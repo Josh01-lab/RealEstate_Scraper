@@ -1,12 +1,11 @@
-# python
-__pycache__/
-*.pyc
+# envs
 .venv/
 venv/
 
-# local runs & artifacts
+# local artifacts
 scraper_output/
-
-# data: ignore everything in data/db except the file we commit
-data/db/*
-!data/db/central.db
+data/
+*.db
+*.sqlite
+__pycache__/
+*.pyc
