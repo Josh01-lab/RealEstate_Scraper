@@ -292,60 +292,64 @@ class PropertyScraper:
         return html
 
     # --- Discovery -------------------------------------------------
-    def url_discovery_routine(self, cfg: ScrapingConfig) -> List[str]:
-        self.logger.info(f"Discovery start {cfg.portal_name}")
-        urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
-        seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
-        if seen_file.exists():
-            self.seen_urls |= {line.strip() for line in open(seen_file, encoding="utf-8")}
+    # in src/scrapers/property_scraper.py
+def url_discovery_routine(self, cfg: ScrapingConfig) -> List[str]:
+    self.logger.info(f"Discovery start {cfg.portal_name}")
+    urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
+    seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
+    if seen_file.exists():
+        self.seen_urls |= set(line.strip() for line in open(seen_file, encoding="utf-8"))
 
-        all_urls: List[str] = []
+    all_urls = []
+    for seed in cfg.seed_urls:
+        current = seed
+        pages = 0
 
-        for seed in cfg.seed_urls:
-            current = seed
-            pages = 0
+        while current and pages < cfg.max_pages:
+            html = self._with_watchdog(
+                lambda: self._fetch_or_cache(current, f"{cfg.portal_name}_list", cfg),
+                timeout_s=70,
+                mode=cfg.scraping_mode.lower()
+            )
+            if not html:
+                self.logger.warning(f"No HTML for {current}; stopping pagination.")
+                break
 
-            while current and pages < cfg.max_pages:
-                html = self._with_watchdog(
-                    lambda: self._fetch_or_cache(current, cfg.portal_name, cfg),
-                    timeout_s=70,
-                    mode=cfg.scraping_mode.lower(),
-                )
-                if not html:
-                    break
+            soup = BeautifulSoup(html, "lxml")
 
-                soup = BeautifulSoup(html, "lxml")
+            # 1) collect listing URLs on this page
+            found = 0
+            for a in soup.select(cfg.listing_selector):
+                href = a.get("href")
+                if not href:
+                    continue
+                full = self._canonicalize_url(urljoin(current, href))
+                if full not in self.seen_urls:
+                    with jsonlines.open(urls_out, "a") as w:
+                        w.write({"url": full, "discovered_at": datetime.now().isoformat()})
+                    self.seen_urls.add(full)
+                    all_urls.append(full)
+                    found += 1
 
-            # collect listing URLs
-                new_count = 0
-                for a in soup.select(cfg.listing_selector):
-                    href = a.get("href")
-                    if not href:
-                        continue
-                    full = self._canonicalize_url(urljoin(current, href))
-                    if full not in self.seen_urls:
-                        with jsonlines.open(urls_out, "a") as w:
-                            w.write({"url": full, "discovered_at": datetime.now().isoformat()})
-                        self.seen_urls.add(full)
-                        all_urls.append(full)
-                        new_count += 1
+            # 2) find the "Next" page
+            nxt_url = None
+            if cfg.pagination_selector:
+                nxt = soup.select_one(cfg.pagination_selector)
+                if nxt and nxt.get("href"):
+                    nxt_url = urljoin(current, nxt.get("href"))
 
-            # paginate
-                nxt = soup.select_one(cfg.pagination_selector) if cfg.pagination_selector else None
-                current = urljoin(current, nxt.get("href")) if (nxt and nxt.get("href")) else None
+            self.logger.info(f"Page {pages+1}: {found} listings | next={bool(nxt_url)}")
+            current = nxt_url
+            pages += 1
+            time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
 
-            # polite delay
-                time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
-                pages += 1
+    with open(seen_file, "w", encoding="utf-8") as f:
+        for u in sorted(self.seen_urls):
+            f.write(u + "\n")
 
-                self.logger.info(f"Discovery {cfg.portal_name}: page {pages}, +{new_count} URLs")
+    self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} new URLs")
+    return all_urls
 
-        with open(seen_file, "w", encoding="utf-8") as f:
-            for u in sorted(self.seen_urls):
-                f.write(u + "\n")
-
-        self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} new URLs")
-        return all_urls
 
 
     
@@ -652,5 +656,6 @@ class PropertyScraper:
             return {"raw": f"{num} sq ft", "sqm": sqm}
 
         return None
+
 
 
