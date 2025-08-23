@@ -1,0 +1,12 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# local runs & artifacts
+scraper_output/
+
+# data: ignore everything in data/db except the file we commit
+data/db/*
+!data/db/central.db
