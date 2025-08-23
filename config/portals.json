@@ -1,0 +1,41 @@
+{
+  "portals": [
+    {
+      "portal_name": "lamudi_cebu",
+      "seed_urls": [
+        "https://www.lamudi.com.ph/rent/cebu/cebu-1/commercial/?page=1"
+      ],
+      "scraping_mode": "playwright",
+      "listing_selector": "a.ListingCell-moreInfo, .ListingCell a[href*='/property/'], a[href*='/property/']",
+      "pagination_selector": "a[rel='next'], a[aria-label='Next'], .pagination-next a",
+      "detail_selectors": {
+        "_wait_for_selector": "a[href*='/property/'], .ListingCell, main",
+        "_detail_wait_for_selector": ".left-details .main-title h1, .prices-and-fees__price, #view-map__text",
+        "title": ".left-details .main-title h1, h1",
+        "address": "#view-map__text.view-map__text, .left-details .view-map__text",
+        "area": ".details-item-value[data-test='area-value']",
+        "price": ".prices-and-fees__price, .Price__Value, .price, [data-qa='price'], .price-value",
+        "bedrooms": "[data-qa='bedrooms'], .KeyFacts .bedrooms",
+        "bathrooms": "[data-qa='bathrooms'], .KeyFacts .bathrooms",
+        "description": ".description, .left-details .description, [data-qa='description']",
+        "property_type": ".place-features [data-test='property-type-value']",
+        "project_name": ".place-features [data-test='project-name-value'], #project-unit__title.link",
+        "offer_type": ".place-features [data-test='operation-type-value']",
+        "parking_spaces": ".place-features [data-test='parking-spaces-value']",
+        "ownership": ".place-features [data-test='ownership-value']",
+        "floor_area": ".place-features [data-test='floor-area-value']",
+        "plot_area": ".place-features [data-test='plot-area-value']",
+        "published_at_text": ".left-details .date"
+      },
+      "rate_limit_delay": 1.4,
+      "max_retries": 5,
+      "timeout": 60,
+      "max_pages": 3,
+      "wait_for_selector": "a[href*='/property/'], .ListingCell, main",
+      "respect_robots": true,
+      "headers": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+      }
+    }
+  ]
+}
