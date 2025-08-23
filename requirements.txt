@@ -1,0 +1,8 @@
+beautifulsoup4
+jsonlines
+lxml
+numpy
+pandas
+playwright
+requests
+streamlit
