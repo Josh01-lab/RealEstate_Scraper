@@ -6,9 +6,13 @@ pandas
 playwright
 requests
 streamlit
-pandas
 jsonlines
 SQLAlchemy>=2.0
 psycopg2-binary
 python-dateutil
+supabase==2.*
+python-dotenv
+jsonlines
+
+
 
