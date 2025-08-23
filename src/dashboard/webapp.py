@@ -4,10 +4,17 @@ import sqlite3
 from pathlib import Path
 import json as _json
 import re
-
 import numpy as np
 import pandas as pd
 import streamlit as st
+import os
+import pandas as pd
+import numpy as np
+import streamlit as st
+from sqlalchemy import create_engine
+from src.metrics.market_metrics import average_days_on_market, ppsqm_growth
+
+engine = create_engine(st.secrets["DATABASE_URL"])
 
 
 # ---------- config ----------
@@ -169,6 +176,37 @@ num_cols = df_view.select_dtypes(include=[np.number]).columns
 df_view[num_cols] = df_view[num_cols].replace([np.inf, -np.inf], np.nan)
 df_view = df_view.dropna(subset=["price_per_sqm"])
 
+st.subheader("Market Trends")
+
+# 1) Average Days on Market
+try:
+    dom_df = average_days_on_market()
+    if not dom_df.empty:
+        colA, colB, colC = st.columns(3)
+        colA.metric("Avg Days on Market", f"{float(dom_df['avg_dom_days'].iloc[0]):.1f}")
+        colB.metric("Median Days on Market", f"{float(dom_df['median_dom_days'].iloc[0]):.1f}")
+        colC.metric("Listings Count (for DOM)", f"{int(dom_df['listings_count'].iloc[0]):,}")
+    else:
+        st.info("No DOM data yet. Keep scraping daily to build history.")
+except Exception as e:
+    st.warning(f"DOM metric error: {e}")
+
+# 2) Price per SqM Growth (7, 14, 21 days)
+tabs = st.tabs(["7-day Growth", "14-day Growth", "21-day Growth"])
+for tab, win in zip(tabs, [7, 14, 21]):
+    with tab:
+        try:
+            gdf = ppsqm_growth(window_days=win)
+            if gdf.empty or gdf["growth_pct"].dropna().empty:
+                st.info("Not enough history yet for growth calculation.")
+            else:
+                st.line_chart(
+                    gdf.set_index("as_of_date")[["avg_ppsqm", "growth_pct"]],
+                    use_container_width=True
+                )
+        except Exception as e:
+            st.warning(f"Growth metric error: {e}")
+
 
 # -----------------------------
 # Now use df_view for filters + table
@@ -213,4 +251,5 @@ st.dataframe(
     df_filtered[display_cols].sort_values(by=["price_php"], ascending=True, na_position="last"),
     use_container_width=True,
 )
+
 
