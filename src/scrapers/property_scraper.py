@@ -1,6 +1,6 @@
 import os, re, json, time, random, hashlib, logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Set
 from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass, asdict
@@ -395,6 +395,26 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
     self.logger.info(f"[{cfg.portal_name}] discovery done: {len(new_urls)} new URLs")
     return new_urls
 
+    def _compute_ppsqm(self, price_php, area_sqm):
+        try:
+            if price_php is None or area_sqm is None or float(area_sqm) <= 0:
+                return None
+            val = float(price_php) / float(area_sqm)
+            return float(val) if np.isfinite(val) else None
+        except Exception:
+            return None
+
+    def _is_valuable(self, url, price_php, area_sqm, ppsqm) -> bool:
+    if not url:
+        return False
+    try:
+        if not price_php or not area_sqm or area_sqm <= 0:
+            return False
+        if ppsqm is None or not np.isfinite(ppsqm):
+            return False
+        return True
+    except Exception:
+        return False
 
 
     
@@ -402,7 +422,8 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
     # --- Details ---------------------------------------------------
     def _parse_listing(self, html: str, url: str, cfg: ScrapingConfig) -> ListingData:
         soup = BeautifulSoup(html, "lxml")
-        listing = ListingData(url=url, scraped_at=datetime.now().isoformat())
+        listing = ListingData(url=url)
+        listing.scraped_at = datetime.now(timezone.utc).isoformat()
 
     # 1) Extract using selectors
         for field, sel in cfg.detail_selectors.items():
@@ -488,6 +509,12 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
 
                 try:
                     listing = self._parse_listing(html, u, cfg)
+                    price_php = listing.price.get("value") 
+                    if listing.price else None
+                    area_sqm  = listing.area.get("sqm") 
+                    if listing.area else None
+                    ppsqm     = self._compute_ppsqm(price_php, area_sqm)
+
                 except Exception as e:
                     self.logger.warning(f"Parse error for {u}: {e}")
                     fail += 1
@@ -504,6 +531,11 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
                     with open(failed_file, "a", encoding="utf-8") as ff:
                         ff.write(u + "\n")
                     continue
+
+                if not self._is_valuable(u, price_php, area_sqm, ppsqm):
+                    self.logger.info(f"Skipping non-valuable {u}")
+                    continue
+
 
                 writer.write(asdict(listing))
                 done.write(u + "\n")
@@ -701,6 +733,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
             return {"raw": f"{num} sq ft", "sqm": sqm}
 
         return None
+
 
 
 
