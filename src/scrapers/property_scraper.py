@@ -293,62 +293,107 @@ class PropertyScraper:
 
     # --- Discovery -------------------------------------------------
     # in src/scrapers/property_scraper.py
-def url_discovery_routine(self, cfg: ScrapingConfig) -> List[str]:
-    self.logger.info(f"Discovery start {cfg.portal_name}")
+def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
+    self.logger.info(f"[{cfg.portal_name}] discovery start")
     urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
     seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
-    if seen_file.exists():
-        self.seen_urls |= set(line.strip() for line in open(seen_file, encoding="utf-8"))
 
-    all_urls = []
+    # load global seen URLs (across runs)
+    if seen_file.exists():
+        self.seen_urls |= {line.strip() for line in open(seen_file, encoding="utf-8")}
+
+    visited_pages: set[str] = set()
+    new_urls: list[str] = []
+
+    def _is_disabled(a):
+        txt = (a.get_text(" ", strip=True) or "").lower()
+        cls = " ".join(a.get("class", []))
+        aria = a.get("aria-disabled") or ""
+        return ("disabled" in cls) or (aria == "true") or ("href" not in a.attrs)
+
     for seed in cfg.seed_urls:
         current = seed
         pages = 0
-
         while current and pages < cfg.max_pages:
+            canon_page = self._canonicalize_url(current)
+            if canon_page in visited_pages:
+                self.logger.info(f"[{cfg.portal_name}] loop detected, stopping at {canon_page}")
+                break
+            visited_pages.add(canon_page)
+
             html = self._with_watchdog(
                 lambda: self._fetch_or_cache(current, f"{cfg.portal_name}_list", cfg),
                 timeout_s=70,
                 mode=cfg.scraping_mode.lower()
             )
             if not html:
-                self.logger.warning(f"No HTML for {current}; stopping pagination.")
+                self.logger.warning(f"[{cfg.portal_name}] no HTML for {current}; stopping pagination.")
                 break
 
             soup = BeautifulSoup(html, "lxml")
 
-            # 1) collect listing URLs on this page
+            # 1) collect listing URLs
             found = 0
-            for a in soup.select(cfg.listing_selector):
-                href = a.get("href")
-                if not href:
-                    continue
-                full = self._canonicalize_url(urljoin(current, href))
-                if full not in self.seen_urls:
-                    with jsonlines.open(urls_out, "a") as w:
-                        w.write({"url": full, "discovered_at": datetime.now().isoformat()})
-                    self.seen_urls.add(full)
-                    all_urls.append(full)
-                    found += 1
+            writer = jsonlines.open(str(urls_out), "a")
+            try:
+                for a in soup.select(cfg.listing_selector):
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    full = self._canonicalize_url(urljoin(current, href))
+                    if full not in self.seen_urls:
+                        writer.write({"url": full, "discovered_at": datetime.now().isoformat()})
+                        self.seen_urls.add(full)
+                        new_urls.append(full)
+                        found += 1
+            finally:
+                writer.close()
 
-            # 2) find the "Next" page
-            nxt_url = None
+            # 2) next page candidates
+            next_url = None
+            # a) explicit selector in config
             if cfg.pagination_selector:
                 nxt = soup.select_one(cfg.pagination_selector)
-                if nxt and nxt.get("href"):
-                    nxt_url = urljoin(current, nxt.get("href"))
+                if nxt and nxt.get("href") and not _is_disabled(nxt):
+                    next_url = urljoin(current, nxt.get("href"))
 
-            self.logger.info(f"Page {pages+1}: {found} listings | next={bool(nxt_url)}")
-            current = nxt_url
+            # b) rel=next
+            if not next_url:
+                rel_next = soup.select_one("a[rel=next], link[rel=next]")
+                if rel_next and rel_next.get("href"):
+                    next_url = urljoin(current, rel_next.get("href"))
+
+            # c) text fallback
+            if not next_url:
+                for cand in soup.select("a"):
+                    txt = (cand.get_text(" ", strip=True) or "").lower()
+                    if txt in {"next", "older", "›", "»"} and cand.get("href") and not _is_disabled(cand):
+                        next_url = urljoin(current, cand.get("href"))
+                        break
+
+            # stop conditions
+            self.logger.info(f"[{cfg.portal_name}] page {pages+1}: {found} listings | next={bool(next_url)}")
+            if found == 0:
+                self.logger.info(f"[{cfg.portal_name}] no listings on page; stopping.")
+                break
+            if not next_url:
+                self.logger.info(f"[{cfg.portal_name}] no next page; stopping.")
+                break
+            if self._canonicalize_url(next_url) == canon_page:
+                self.logger.info(f"[{cfg.portal_name}] next equals current; stopping.")
+                break
+
+            current = next_url
             pages += 1
             time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
 
+    # persist global seen
     with open(seen_file, "w", encoding="utf-8") as f:
         for u in sorted(self.seen_urls):
             f.write(u + "\n")
 
-    self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} new URLs")
-    return all_urls
+    self.logger.info(f"[{cfg.portal_name}] discovery done: {len(new_urls)} new URLs")
+    return new_urls
 
 
 
@@ -656,6 +701,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> List[str]:
             return {"raw": f"{num} sq ft", "sqm": sqm}
 
         return None
+
 
 
 
