@@ -8,11 +8,11 @@ requests
 streamlit
 jsonlines
 SQLAlchemy>=2.0
-psycopg2-binary
 python-dateutil
-supabase==2.*
-python-dotenv
 jsonlines
+supabase>=2.5.0
+psycopg[binary,pool]>=3.2
+python-dotenv>=1.0
 
 
 
