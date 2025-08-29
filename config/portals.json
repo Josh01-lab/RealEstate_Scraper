@@ -30,7 +30,7 @@
       "rate_limit_delay": 1.4,
       "max_retries": 5,
       "timeout": 60,
-      "max_pages": 3,
+      "max_pages": 120,
       "wait_for_selector": "a[href*='/property/'], .ListingCell, main",
       "respect_robots": true,
       "headers": {
@@ -39,3 +39,4 @@
     }
   ]
 }
+
