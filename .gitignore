@@ -1,11 +1,15 @@
-# envs
-.venv/
-venv/
+# secrets
+.env
+*.env
 
-# local artifacts
+# mac/win/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# logs & debug artifacts
+*.log
+logs/
 scraper_output/
-data/
-*.db
-*.sqlite
-__pycache__/
-*.pyc
+playwright-report/
