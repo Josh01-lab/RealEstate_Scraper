@@ -1,27 +1,31 @@
-import logging
-from supabase import create_client
+from typing import List, Dict
+import time
+from .supabase_client import get_client  # your minimal client
 
-logger = logging.getLogger("supabase")
+class SupabaseWriter:
+    def __init__(self, batch_size: int = 100, retries: int = 3):
+        self.client = get_client()
+        self.batch_size = batch_size
+        self.retries = retries
+        self.buffer: List[Dict] = []
 
-class SupabaseClient:
-    def __init__(self, url: str, key: str):
-        if not url or not key:
-            raise RuntimeError("Supabase URL/Key missing")
-        self.client = create_client(url, key)
+    def add(self, row: Dict):
+        self.buffer.append(row)
+        if len(self.buffer) >= self.batch_size:
+            self.flush()
 
-    def upsert_listings(self, rows: list[dict]):
-        """Upsert normalized listing rows into listings (conflict on URL)."""
-        if not rows:
+    def flush(self):
+        if not self.buffer:
             return
-        try:
-            resp = (
-                self.client
-                .table("listings")
-                .upsert(rows, on_conflict=["url"])
-                .execute()
-            )
-            logger.info(f"Upserted {len(rows)} rows → listings")
-            return resp.data
-        except Exception as e:
-            logger.error(f"Supabase upsert failed: {e}")
-            raise
+        for attempt in range(1, self.retries + 1):
+            try:
+                self.client.table("listings").upsert(self.buffer).execute()
+                self.buffer.clear()
+                return
+            except Exception as e:
+                if attempt == self.retries:
+                    raise
+                time.sleep(2 ** attempt)  # backoff
+
+    def close(self):
+        self.flush()
