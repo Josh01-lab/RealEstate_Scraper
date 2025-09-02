@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import List, Dict, Optional, Set
 from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass, asdict
-
+from src.db.supabase_client import SupaBaseClient
+from scrc.db.writer import upsert_listings_batched
 import requests, jsonlines
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
@@ -755,6 +756,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
             return {"raw": f"{num} sq ft", "sqm": sqm}
 
         return None
+
 
 
 
