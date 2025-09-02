@@ -9,6 +9,8 @@ from scrc.db.writer import upsert_listings_batched
 import requests, jsonlines
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
+from src.db.supabase_writer import SupabaseWriter
+
 
 # Optional heavy tools
 try:
@@ -460,11 +462,32 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
         return listing
 
 
+    ter = SupabaseWriter(batch_size=100)
+
+for listing in listings:  # after parsing each detail
+    payload = {
+        "url": listing.url,
+        "listing_title": listing.title,
+        "price_json": listing.price,
+        "area_json": listing.area,
+        "address": listing.address,
+        "scraped_at": listing.scraped_at,
+        "source": cfg.portal_name,
+        # optional: normalize price_php/area_sqm/ppsqm here
+    }
+    writer.add(payload)
+
+# after all pages
+writer.close()
+
     def detail_extraction_stage(self, listing_urls, cfg):
         self.logger.info(f"Starting detail extraction for {cfg.portal_name} with {len(listing_urls)} URLs")
         if not listing_urls:
             self.logger.warning("No URLs to process; did discovery run?")
             return 0
+
+    # NEW: Supabase batch writer (100-per batch by default)
+        writer_db = SupabaseWriter(batch_size=100, retries=3)
 
         processed_file = self.dirs["staged"] / f"{cfg.portal_name}_processed.txt"
         processed = set()
@@ -477,7 +500,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
         success = fail = 0
         mode = cfg.scraping_mode.lower()
 
-        with jsonlines.open(out_file, "a") as writer, open(processed_file, "a", encoding="utf-8") as done:
+        with jsonlines.open(out_file, "a") as writer_jsonl, open(processed_file, "a", encoding="utf-8") as done:
             for idx, u in enumerate(listing_urls, 1):
                 if u in processed:
                     continue
@@ -496,8 +519,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
                         mode=mode
                     )
                     if html is None:
-                    # brief backoff for transient hiccups like ERR_NETWORK_CHANGED
-                        time.sleep(1.0 * attempt)
+                        time.sleep(1.0 * attempt)  # brief backoff
 
                 if not html:
                     fail += 1
@@ -506,16 +528,8 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
                     continue
             # --- end per-URL retry loop ---
 
-                from dataclasses import is_dataclass, asdict
-
                 try:
                     listing = self._parse_listing(html, u, cfg)
-                    price_php = listing.price.get("value") 
-                    if listing.price else None
-                    area_sqm  = listing.area.get("sqm") 
-                    if listing.area else None
-                    ppsqm     = self._compute_ppsqm(price_php, area_sqm)
-
                 except Exception as e:
                     self.logger.warning(f"Parse error for {u}: {e}")
                     fail += 1
@@ -523,6 +537,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
                         ff.write(u + "\n")
                     continue
 
+                from dataclasses import is_dataclass, asdict
                 if not is_dataclass(listing):
                     self.logger.warning(
                         f"_parse_listing did not return a dataclass for {u} "
@@ -533,40 +548,58 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
                         ff.write(u + "\n")
                     continue
 
-                if not self._is_valuable(u, price_php, area_sqm, ppsqm):
-                    self.logger.info(f"Skipping non-valuable {u}")
-                    continue
-
-
-                writer.write(asdict(listing))
+            # Write JSONL backup
+                writer_jsonl.write(asdict(listing))
                 done.write(u + "\n")
-                success += 1
 
-                # 2) build normalized row for Supabase
-                norm_row = {
+            # --- Build normalized payload for DB ---
+                def _num(x):
+                    try:
+                        return float(x)
+                    except Exception:
+                        return None
+
+                price_php = None
+                if listing.price and isinstance(listing.price, dict):
+                    if (listing.price.get("currency") in (None, "PHP")) and listing.price.get("value") is not None:
+                        price_php = _num(listing.price["value"])
+
+                area_sqm = None
+                if listing.area and isinstance(listing.area, dict):
+                    area_sqm = _num(listing.area.get("sqm"))
+
+                price_per_sqm = None
+                if price_php is not None and area_sqm and area_sqm > 0:
+                    price_per_sqm = price_php / area_sqm
+
+                payload = {
                     "url": listing.url,
-                    "listing_title": listing.title or None,
-                    "property_type": getattr(listing, "property_type", None),
-                    "address": listing.address or None,
-                    "price_php": (listing.price or {}).get("value"),
-                    "area_sqm": (listing.area or {}).get("sqm"),
-                    "price_per_sqm": None,
-                    "price_json": listing.price,
-                    "area_json": listing.area,
-                    "scraped_at": listing.scraped_at,
+                    "listing_title": listing.title,
+                    "property_type": None,                 # fill if you parse it
+                    "address": listing.address,
+                    "price_php": price_php,
+                    "area_sqm": area_sqm,
+                    "price_per_sqm": price_per_sqm,
+                    "price_json": listing.price or None,   # jsonb in PG
+                    "area_json": listing.area or None,     # jsonb in PG
+                    "scraped_at": listing.scraped_at,      # ISO string OK for timestamptz
                     "source": cfg.portal_name,
                 }
-                if norm_row["price_php"] and norm_row["area_sqm"]:
-                    try:
-                        norm_row["price_per_sqm"] = float(norm_row["price_php"]) / float(norm_row["area_sqm"])
-                    except Exception:
-                        pass
 
-                rows_for_db.append(norm_row)
+            # NEW: enqueue for batched upsert to Supabase
+                writer_db.add(payload)
 
+            # Optional: flush periodically (belt-and-suspenders)
+                if idx % 50 == 0:
+                    writer_db.flush()
+
+                success += 1
 
             # politeness / anti-fingerprint jitter
                 time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
+
+    # NEW: ensure last partial batch is sent
+        writer_db.close()
 
         self.logger.info(f"Details complete {cfg.portal_name} — success:{success} fail:{fail}")
         return success
@@ -756,6 +789,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
             return {"raw": f"{num} sq ft", "sqm": sqm}
 
         return None
+
 
 
 
