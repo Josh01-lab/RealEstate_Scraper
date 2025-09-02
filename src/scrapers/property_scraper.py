@@ -541,6 +541,28 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
                 done.write(u + "\n")
                 success += 1
 
+                # 2) build normalized row for Supabase
+                norm_row = {
+                    "url": listing.url,
+                    "listing_title": listing.title or None,
+                    "property_type": getattr(listing, "property_type", None),
+                    "address": listing.address or None,
+                    "price_php": (listing.price or {}).get("value"),
+                    "area_sqm": (listing.area or {}).get("sqm"),
+                    "price_per_sqm": None,
+                    "price_json": listing.price,
+                    "area_json": listing.area,
+                    "scraped_at": listing.scraped_at,
+                    "source": cfg.portal_name,
+                }
+                if norm_row["price_php"] and norm_row["area_sqm"]:
+                    try:
+                        norm_row["price_per_sqm"] = float(norm_row["price_php"]) / float(norm_row["area_sqm"])
+                    except Exception:
+                        pass
+
+                rows_for_db.append(norm_row)
+
 
             # politeness / anti-fingerprint jitter
                 time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
@@ -733,6 +755,7 @@ def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
             return {"raw": f"{num} sq ft", "sqm": sqm}
 
         return None
+
 
 
 
