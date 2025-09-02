@@ -26,6 +26,14 @@ jobs:
       - name: Run scraper (discover+details)
         run: |
           python -m src.main --phase all --portals lamudi_cebu
+      - name: Dry-run discovery (no DB writes)
+        env:
+          DRYRUN_MAX_PAGES: "2"
+          DRYRUN_MODE: "playwright"     # or leave unset if your portals config is solid
+          DRYRUN_RATE_DELAY: "0.5"
+        run: |
+          python -m pip install -r requirements.txt
+          python scripts/dry_run_discovery.py  
 
       - name: Load latest JSONL to Postgres
         run: |
