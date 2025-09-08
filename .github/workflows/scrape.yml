@@ -8,16 +8,12 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     env:
-      # ---- runtime knobs (override portals.json if needed) ----
-      MAX_PAGES: "50"                # start conservative; raise later
-      RATE_LIMIT_DELAY: "1.2"
-      SCRAPING_MODE: "playwright"
-      LOG_LEVEL: "INFO"
-      # ---- DB (must be set in repo Secrets) ----
-      DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      # optional: used by supabase_client if you decide to switch
+      ENV: ${{ vars.ENV }}
+      MAX_PAGES: ${{ vars.MAX_PAGES }}
+      RATE_LIMIT_DELAY: ${{ vars.RATE_LIMIT_DELAY }}
+      SCRAPING_MODE: ${{ vars.SCRAPING_MODE }}
+      PORTALS_CONFIG: ${{ vars.PORTALS_CONFIG }}
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
@@ -29,55 +25,43 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: "pip"
+          cache: pip
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ✅ Install Playwright browsers + OS deps (the common failure)
-      - name: Install Playwright
-        uses: microsoft/playwright-github-action@v1
-
-      # Optional: show environment summary for debugging
-      - name: Debug env
+      # ✅ Correct way for CI: install Chromium + system deps
+      - name: Install Playwright (browsers + deps)
         run: |
-          python -V
-          pip freeze | sed -n '1,120p'
-          echo "ENV=$ENV"
-          echo "SCRAPING_MODE=$SCRAPING_MODE MAX_PAGES=$MAX_PAGES RATE_LIMIT_DELAY=$RATE_LIMIT_DELAY"
-          # Masked, but confirms presence
-          test -n "${DATABASE_URL}" && echo "DATABASE_URL present"
+          python -m playwright install --with-deps chromium
 
-      # 🌱 Discovery (URL collection)
-      - name: Run discovery (lamudi_cebu)
+      - name: Validate required secrets
         run: |
-          python -m src.scripts.discovery --portal lamudi_cebu
+          test -n "$SUPABASE_URL" || (echo "Missing SUPABASE_URL" && exit 1)
+          test -n "$SUPABASE_SERVICE_ROLE_KEY" || (echo "Missing SUPABASE_SERVICE_ROLE_KEY" && exit 1)
 
-      # 🔎 Details (listing pages)
-      - name: Run details (reuse same run dir)
+      - name: Run discovery
+        run: python -m src.scripts.run_discovery --portal lamudi_cebu
+
+      - name: Run details
         run: |
-          LAST_RUN=$(ls -1d scraper_output/run_* | tail -n1)
-          python -m src.scripts.details --portal lamudi_cebu --run-dir "$LAST_RUN"
+          RUN_DIR=$(ls -1d scraper_output/run_* | tail -n1)
+          echo "Using run dir: $RUN_DIR"
+          python -m src.scripts.run_details --portal lamudi_cebu --run-dir "$RUN_DIR"
 
-      # 🗄️ Load to Postgres (Supabase)
-      - name: Load latest JSONL to Postgres
+      - name: Write portal dump to Supabase
         run: |
-          LAST_RUN=$(ls -1d scraper_output/run_* | tail -n1)
-          FILE="$LAST_RUN/staged/lamudi_cebu_listings.jsonl"
-          test -f "$FILE"
-          python -m src.etl.load_to_postgres --input "$FILE" --table listings
+          RUN_DIR=$(ls -1d scraper_output/run_* | tail -n1)
+          python -m src.scripts.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "$RUN_DIR"
 
-      # 📦 Always upload artifacts so we can see logs/HTML if it fails
-      - name: Upload scraper artifacts
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scraper_output_${{ github.run_id }}
+          name: lamudi_cebu_jsonl
           path: |
-            scraper_output/**
-            */.log
-            **/debug_last.html
-            **/debug_last.png
+            scraper_output/run_*/staged/lamudi_cebu_urls.jsonl
+            scraper_output/run_*/staged/lamudi_cebu_listings.jsonl
           if-no-files-found: ignore
