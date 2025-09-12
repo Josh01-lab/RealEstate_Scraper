@@ -2,7 +2,7 @@ name: Nightly scrape (Lamudi Cebu)
 
 on:
   schedule:
-    - cron: "0 16 * * *" # 16:00 UTC = 12:00 MN PH (+8). Adjust as you like.
+    - cron: "0 19 * * *" # 16:00 UTC = 3:00 a.m PH (+8). Adjust as you like.
   workflow_dispatch:
 
 jobs:
