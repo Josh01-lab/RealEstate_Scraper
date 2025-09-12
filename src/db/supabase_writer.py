@@ -42,7 +42,7 @@ class SupabaseWriter:
     def flush(self):
         if not self.buffer:
             return
-        payload = self.buffer
+        payload["source_env"] = os.getenv("SOURCE_ENV", "prod")
         self.buffer = []
         for attempt in range(1, self.retries + 1):
             try:
