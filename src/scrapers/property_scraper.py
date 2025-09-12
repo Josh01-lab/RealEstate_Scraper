@@ -2,14 +2,30 @@ import os, re, json, time, random, hashlib, logging
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Set
-from urllib.parse import urljoin, urlparse
-from dataclasses import dataclass, asdict
-from src.db.supabase_client import SupaBaseClient
-from scrc.db.writer import upsert_listings_batched
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
+from dataclasses import dataclass, asdict, is_dataclass
+import re
+from datetime import datetime, timedelta, timezone
+from dateutil import parser as dtparse
 import requests, jsonlines
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
-from src.db.supabase_writer import SupabaseWriter
+from src.config import MAX_PAGES as ENV_MAX_PAGES, RATE_LIMIT_DELAY as ENV_RATE_DELAY, SCRAPING_MODE as ENV_SCRAPE_MODE
+
+
+
+
+
+REL_RE = re.compile(
+    r"(?:(?P<years>\d+)\s*year[s]?)?\s*,?\s*"
+    r"(?:(?P<months>\d+)\s*month[s]?)?\s*,?\s*"
+    r"(?:(?P<weeks>\d+)\s*week[s]?)?\s*,?\s*"
+    r"(?:(?P<days>\d+)\s*day[s]?)?\s*,?\s*"
+    r"(?:(?P<hours>\d+)\s*hour[s]?)?\s*,?\s*"
+    r"(?:(?P<minutes>\d+)\s*minute[s]?)?\s*ago",
+    flags=re.I,
+)
+
 
 
 # Optional heavy tools
@@ -28,8 +44,6 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
-
-
 
 
 @dataclass
@@ -53,9 +67,11 @@ class ScrapingConfig:
             self.detail_selectors = {}
         if self.headers is None:
             self.headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                              " AppleWebKit/537.36 (KHTML, like Gecko)"
-                              " Chrome/115.0 Safari/537.36"
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/115.0 Safari/537.36"
+                )
             }
 
 
@@ -73,31 +89,13 @@ class ListingData:
 
 
 class PropertyScraper:
-    def _iter_discovered_urls(self, portal_name: str):
-        import glob, jsonlines, os
-
-    # 1) Current run
-        curr = self.dirs["staged"] / f"{portal_name}_urls.jsonl"
-        if curr.exists():
-            with jsonlines.open(str(curr)) as r:
-             for rec in r:
-                yield rec
-        return
-
-    # 2) Any previous run(s)
-        pattern = os.path.join("scraper_output", "run_*", "staged", f"{portal_name}_urls.jsonl")
-        for path in sorted(glob.glob(pattern)):
-            with jsonlines.open(path) as r:
-                for rec in r:
-                    yield rec
-
     def __init__(self, config_path: str):
         self.run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.base_dir = Path("scraper_output") / f"run_{self.run_id}"
         self.dirs = {
             "raw_html": self.base_dir / "raw_html",
             "staged": self.base_dir / "staged",
-            "logs": self.base_dir / "logs"
+            "logs": self.base_dir / "logs",
         }
         for d in self.dirs.values():
             d.mkdir(parents=True, exist_ok=True)
@@ -107,7 +105,7 @@ class PropertyScraper:
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s %(levelname)s %(message)s",
-            handlers=[logging.FileHandler(log_file), logging.StreamHandler()]
+            handlers=[logging.FileHandler(log_file), logging.StreamHandler()],
         )
         self.logger = logging.getLogger("scraper")
 
@@ -115,12 +113,23 @@ class PropertyScraper:
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         self.configs = [ScrapingConfig(**pc) for pc in cfg.get("portals", [])]
+        for cfg in self.configs:
+            if ENV_SCRAPE_MODE:
+                cfg.scraping_mode = ENV_SCRAPE_MODE
+            # page cap should be a HARD upper bound
+            cfg.max_pages = min(cfg.max_pages, ENV_MAX_PAGES)
+            # never run faster than the global delay
+            cfg.rate_limit_delay = max(cfg.rate_limit_delay, ENV_RATE_DELAY)
+
 
         # requests session with retries
         self.session = requests.Session()
-        retries = Retry(total=5, backoff_factor=0.5,
-                        status_forcelist=[429, 500, 502, 503, 504],
-                        allowed_methods=["GET", "HEAD"])
+        retries = Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET", "HEAD"],
+        )
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
@@ -131,7 +140,11 @@ class PropertyScraper:
 
         self.seen_urls: Set[str] = set()
 
-    # --- Fetchers ---------------------------------------------------
+    # --- Helpers ---------------------------------------------------
+    def _canonicalize_url(self, url: str) -> str:
+        pu = urlparse(url)
+        return f"{pu.scheme}://{pu.netloc}{pu.path}".rstrip("/")
+
     def _fetch_with_requests(self, url: str, cfg: ScrapingConfig) -> Optional[str]:
         try:
             r = self.session.get(url, headers=cfg.headers, timeout=cfg.timeout)
@@ -145,655 +158,289 @@ class PropertyScraper:
         except Exception as e:
             self.logger.warning(f"Requests error {url}: {e}")
             return None
+        
+    def url_discovery_routine(self, cfg: "ScrapingConfig") -> List[str]:
+        self.logger.info(f"Discovery start {cfg.portal_name}")
+        urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
+        seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
 
-    def _ensure_selenium(self, cfg):
-        if not SELENIUM_AVAILABLE:
-            return None
-        if self._selenium_driver is None:
-            options = ChromeOptions()
-            options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            self._selenium_driver = webdriver.Chrome(options=options)
-            self._selenium_wait = WebDriverWait(self._selenium_driver, cfg.timeout)
-        return self._selenium_driver
+        # optional hard cap by count
+        MAX_LISTINGS = int(os.getenv("MAX_LISTINGS", "0"))
 
-    def _fetch_with_selenium(self, url: str, cfg: ScrapingConfig) -> Optional[str]:
-        driver = self._ensure_selenium(cfg)
-        try:
-            driver.get(url)
-            self._selenium_wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-            if cfg.wait_for_selector:
-                self._selenium_wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, cfg.wait_for_selector)))
-            return driver.page_source
-        except Exception as e:
-            self.logger.warning(f"Selenium error {url}: {e}")
-            return None
-
-    def _ensure_playwright(self, cfg):
-        if not PLAYWRIGHT_AVAILABLE:
-            return None
-        if self._pw is None:
-            self._pw = sync_playwright().start()
-            self._pw_browser = self._pw.chromium.launch(headless=True)
-            self._pw_context = self._pw_browser.new_context(user_agent=cfg.headers.get("User-Agent"))
-        return self._pw_context
-
-    def _fetch_with_playwright(self, url: str, cfg: ScrapingConfig) -> Optional[str]:
-        ctx = self._ensure_playwright(cfg)
-        page = ctx.new_page()
-        page.set_default_navigation_timeout(cfg.timeout * 1000)
-
-        nav_attempts = 3
-        for i in range(1, nav_attempts + 1):
-            try:
-                page.goto(url, wait_until="domcontentloaded")
-                break
-            except Exception as e:
-                if "ERR_NETWORK_CHANGED" in str(e) and i < nav_attempts:
-                    self.logger.warning(f"goto retry {i}/{nav_attempts} for {url} due to {e}")
-                    page.wait_for_timeout(500 * i)
-                    continue
-                raise
-
-        try:
-        # Cookie/consent best-effort
-            try:
-                page.locator(
-                    "button:has-text('Accept'), button:has-text('I agree'), "
-                    "#onetrust-accept-btn-handler, "
-                    "button[aria-label*='accept' i]"
-                ).first.click(timeout=3000)
-            except Exception:
-                pass
-
-        # Decide wait targets by URL type
-            is_detail = "/property/" in url
-            candidates = []
-            if is_detail:
-                detail_wait = cfg.detail_selectors.get("_detail_wait_for_selector")
-                candidates.extend([
-                    detail_wait,
-                    ".left-details .main-title h1",
-                    ".prices-and-fees__price",
-                    "#view-map__text",
-                    "h1"
-                ])
-            else:
-                candidates.extend([
-                    cfg.wait_for_selector,
-                    cfg.detail_selectors.get("_wait_for_selector"),
-                    "a[href*='/property/']",
-                    ".ListingCell",
-                    "main"
-                ])
-
-        # Wait for first selector that attaches in DOM
-            for sel in [c for c in candidates if c]:
-                try:
-                    page.wait_for_selector(sel, timeout=cfg.timeout * 1000, state="attached")
-                    break
-                except Exception:
-                    continue
-
-        # Let XHR/lazy load settle a bit
-            try:
-                page.wait_for_load_state("networkidle", timeout=4000)
-            except Exception:
-                pass
-
-        # Nudge lazy content
-            try:
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(800)
-            except Exception:
-                pass
-
-            html = page.content()
-            return html
-
-        except Exception as e:
-            self.logger.warning(f"Playwright error {url}: {e}")
-            try:
-                page.screenshot(path=str(self.dirs["logs"] / "debug_last.png"))
-                with open(self.dirs["logs"] / "debug_last.html", "w", encoding="utf-8") as f:
-                    f.write(page.content())
-            except Exception:
-                pass
-            return None
-        finally:
-            page.close()
-
-
-
-    def _get_page_content(self, url: str, cfg: ScrapingConfig) -> Optional[str]:
-        if cfg.scraping_mode == "requests":
-            return self._fetch_with_requests(url, cfg)
-        elif cfg.scraping_mode == "selenium":
-            return self._fetch_with_selenium(url, cfg)
-        elif cfg.scraping_mode == "playwright":
-            return self._fetch_with_playwright(url, cfg)
-        else:
-            self.logger.error(f"Unknown scraping_mode {cfg.scraping_mode}")
-            return None
-
-    # --- Helpers ---------------------------------------------------
-    def _canonicalize_url(self, url: str) -> str:
-        pu = urlparse(url)
-        return f"{pu.scheme}://{pu.netloc}{pu.path}".rstrip("/")
-
-    def _html_cache_path(self, url: str, portal: str):
-        uhash = hashlib.sha1(self._canonicalize_url(url).encode()).hexdigest()
-        return self.dirs["raw_html"] / f"{portal}_{uhash}.html"
-
-    def _fetch_or_cache(self, url: str, portal: str, cfg: ScrapingConfig):
-        p = self._html_cache_path(url, portal)
-        if p.exists():
-            return p.read_text(encoding="utf-8")
-        html = self._get_page_content(url, cfg)
-        if html:
-            p.write_text(html, encoding="utf-8")
-        return html
-
-    # --- Discovery -------------------------------------------------
-    # in src/scrapers/property_scraper.py
-def url_discovery_routine(self, cfg: ScrapingConfig) -> list[str]:
-    self.logger.info(f"[{cfg.portal_name}] discovery start")
-    urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
-    seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
-
-    # load global seen URLs (across runs)
-    if seen_file.exists():
-        self.seen_urls |= {line.strip() for line in open(seen_file, encoding="utf-8")}
-
-    visited_pages: set[str] = set()
-    new_urls: list[str] = []
-
-    def _is_disabled(a):
-        txt = (a.get_text(" ", strip=True) or "").lower()
-        cls = " ".join(a.get("class", []))
-        aria = a.get("aria-disabled") or ""
-        return ("disabled" in cls) or (aria == "true") or ("href" not in a.attrs)
-
-    for seed in cfg.seed_urls:
-        current = seed
+        all_urls: List[str] = []
         pages = 0
-        while current and pages < cfg.max_pages:
-            canon_page = self._canonicalize_url(current)
-            if canon_page in visited_pages:
-                self.logger.info(f"[{cfg.portal_name}] loop detected, stopping at {canon_page}")
-                break
-            visited_pages.add(canon_page)
+        current = cfg.seed_urls[0]
 
-            html = self._with_watchdog(
-                lambda: self._fetch_or_cache(current, f"{cfg.portal_name}_list", cfg),
-                timeout_s=70,
-                mode=cfg.scraping_mode.lower()
-            )
+        while current and pages < cfg.max_pages:
+            html = self._get_page_content(current, cfg)
             if not html:
-                self.logger.warning(f"[{cfg.portal_name}] no HTML for {current}; stopping pagination.")
+                self.logger.warning(f"No HTML for {current}; stopping pagination.")
                 break
 
             soup = BeautifulSoup(html, "lxml")
 
-            # 1) collect listing URLs
+            # collect listing URLs
             found = 0
-            writer = jsonlines.open(str(urls_out), "a")
-            try:
-                for a in soup.select(cfg.listing_selector):
-                    href = a.get("href")
-                    if not href:
-                        continue
-                    full = self._canonicalize_url(urljoin(current, href))
-                    if full not in self.seen_urls:
-                        writer.write({"url": full, "discovered_at": datetime.now().isoformat()})
-                        self.seen_urls.add(full)
-                        new_urls.append(full)
-                        found += 1
-            finally:
-                writer.close()
+            for a in soup.select(cfg.listing_selector):
+                href = a.get("href")
+                if not href:
+                    continue
+                full = self._canonicalize_url(urljoin(current, href))
+                if full not in self.seen_urls:
+                    # hard-cap by count if requested
+                    if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
+                        current = None  # stop outer loop too
+                        break
+                    with jsonlines.open(urls_out, "a") as w:
+                        w.write({"url": full, "discovered_at": datetime.now(timezone.utc).isoformat()})
+                    self.seen_urls.add(full)
+                    all_urls.append(full)
+                    found += 1
 
-            # 2) next page candidates
-            next_url = None
-            # a) explicit selector in config
+            # next page
+            nxt_url = None
             if cfg.pagination_selector:
                 nxt = soup.select_one(cfg.pagination_selector)
-                if nxt and nxt.get("href") and not _is_disabled(nxt):
-                    next_url = urljoin(current, nxt.get("href"))
+                if nxt and nxt.get("href"):
+                    nxt_url = urljoin(current, nxt.get("href"))
 
-            # b) rel=next
-            if not next_url:
-                rel_next = soup.select_one("a[rel=next], link[rel=next]")
-                if rel_next and rel_next.get("href"):
-                    next_url = urljoin(current, rel_next.get("href"))
-
-            # c) text fallback
-            if not next_url:
-                for cand in soup.select("a"):
-                    txt = (cand.get_text(" ", strip=True) or "").lower()
-                    if txt in {"next", "older", "›", "»"} and cand.get("href") and not _is_disabled(cand):
-                        next_url = urljoin(current, cand.get("href"))
-                        break
-
-            # stop conditions
-            self.logger.info(f"[{cfg.portal_name}] page {pages+1}: {found} listings | next={bool(next_url)}")
-            if found == 0:
-                self.logger.info(f"[{cfg.portal_name}] no listings on page; stopping.")
-                break
-            if not next_url:
-                self.logger.info(f"[{cfg.portal_name}] no next page; stopping.")
-                break
-            if self._canonicalize_url(next_url) == canon_page:
-                self.logger.info(f"[{cfg.portal_name}] next equals current; stopping.")
-                break
-
-            current = next_url
             pages += 1
+            self.logger.info(f"Page {pages}: {found} listings | next={bool(nxt_url)}")
+            current = nxt_url
             time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
 
-    # persist global seen
-    with open(seen_file, "w", encoding="utf-8") as f:
-        for u in sorted(self.seen_urls):
-            f.write(u + "\n")
+        self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} urls")
+        return all_urls
 
-    self.logger.info(f"[{cfg.portal_name}] discovery done: {len(new_urls)} new URLs")
-    return new_urls
 
-    def _compute_ppsqm(self, price_php, area_sqm):
+    def _ensure_playwright(self, cfg: "ScrapingConfig"):
+        if not PLAYWRIGHT_AVAILABLE:
+            return None
+        if getattr(self, "_pw_ctx", None):
+            return self._pw_ctx
+
+        self._pw = sync_playwright().start()
+        self._pw_browser = self._pw.chromium.launch(headless=True)
+        self._pw_ctx = self._pw_browser.new_context(user_agent=cfg.headers.get("User-Agent"))
+        return self._pw_ctx
+
+    def _fetch_with_playwright(self, url: str, cfg: "ScrapingConfig") -> Optional[str]:
+        if not PLAYWRIGHT_AVAILABLE:
+            return None
+        ctx = self._ensure_playwright(cfg)
+        page = ctx.new_page()
+        page.set_default_navigation_timeout(cfg.timeout * 1000)
         try:
-            if price_php is None or area_sqm is None or float(area_sqm) <= 0:
-                return None
-            val = float(price_php) / float(area_sqm)
-            return float(val) if np.isfinite(val) else None
+            page.goto(url, wait_until="domcontentloaded")
+            # try to accept cookies
+            try:
+                page.locator(
+                    "button:has-text('Accept'), button:has-text('I agree'), "
+                    "#onetrust-accept-btn-handler, button[aria-label*='accept' i]"
+                ).first.click(timeout=2500)
+            except Exception:
+                pass
+            # wait for something meaningful
+            wait_for = cfg.wait_for_selector
+            if "/property/" in url:
+                wait_for = (cfg.detail_selectors or {}).get("_detail_wait_for_selector") or wait_for
+            if wait_for:
+                page.wait_for_selector(wait_for, timeout=cfg.timeout * 1000, state="attached")
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            return page.content()
+        except Exception as e:
+            self.logger.warning(f"Playwright error {url}: {e}")
+            return None
+        finally:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+    def _get_page_content(self, url: str, cfg: "ScrapingConfig") -> Optional[str]:
+        mode = (cfg.scraping_mode or "requests").lower()
+        if mode == "requests":
+            return self._fetch_with_requests(url, cfg)
+        if mode == "playwright":
+            return self._fetch_with_playwright(url, cfg)
+        if mode == "selenium":
+            self.logger.warning("Selenium mode not implemented in this build.")
+            return None
+        self.logger.warning(f"Unknown scraping mode '{cfg.scraping_mode}', defaulting to requests().")
+        return self._fetch_with_requests(url, cfg)
+
+    # --- Normalizers & helpers ------------------------------------
+    def _normalize_price(self, raw: Optional[str]) -> Optional[dict]:
+        if not raw: return None
+        txt = self._clean_text(raw)
+        # accept "₱ 95,200 /month" or "Php 95,200 / month"
+        m = re.search(r"(?:₱|Php)\s*([\d,]+)(?:\s*/\s*(month|mo|year|yr|day))?", txt, re.I)
+        if not m: return {"raw": txt}
+        value = float(m.group(1).replace(",", ""))
+        period = m.group(2).lower() if m.group(2) else None
+        if period in {"mo"}: period = "month"
+        if period in {"yr"}: period = "year"
+        return {"raw": txt, "currency": "PHP", "value": value, "period": period}
+
+    def _normalize_area(self, raw: Optional[str]) -> Optional[dict]:
+        if not raw: return None
+        txt = self._clean_text(raw)
+        m = re.search(r"([\d,.]+)\s*(sqm|m²|sq\.? m)", txt, re.I)
+        if not m: return {"raw": txt}
+        sqm = float(m.group(1).replace(",", ""))
+        return {"raw": txt, "sqm": sqm}
+
+    def _extract_number(self, txt: str) -> Optional[int]:
+        m = re.search(r"\d+", txt or "")
+        return int(m.group()) if m else None
+
+    def _parse_published_at(self, text: Optional[str]) -> Optional[str]:
+        # relative like '1 day, 6 hours ago' OR absolute like '12 Sep 2023'
+        if not text:
+            return None
+        t = text.strip()
+
+        m = REL_RE.search(t)
+        if m:
+            now = datetime.now(timezone.utc)
+            parts = {k: int(v) for k, v in m.groupdict(default="0").items()}
+            delta = timedelta(
+                days=parts["days"] + parts["weeks"] * 7 + parts["months"] * 30 + parts["years"] * 365,
+                hours=parts["hours"],
+                minutes=parts["minutes"],
+            )
+            return (now - delta).isoformat()
+
+        try:
+            dt = dtparse.parse(t)
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc).isoformat()
         except Exception:
             return None
 
-    def _is_valuable(self, url, price_php, area_sqm, ppsqm) -> bool:
-    if not url:
-        return False
-    try:
-        if not price_php or not area_sqm or area_sqm <= 0:
-            return False
-        if ppsqm is None or not np.isfinite(ppsqm):
-            return False
-        return True
-    except Exception:
-        return False
-
-
-    
-
-    # --- Details ---------------------------------------------------
-    def _parse_listing(self, html: str, url: str, cfg: ScrapingConfig) -> ListingData:
+    # --- Listing detail parse -------------------------------------
+    def _parse_listing(self, html: str, url: str, cfg: "ScrapingConfig") -> "ListingData":
         soup = BeautifulSoup(html, "lxml")
-        listing = ListingData(url=url)
-        listing.scraped_at = datetime.now(timezone.utc).isoformat()
+        listing = ListingData(url=url, scraped_at=datetime.now(timezone.utc).isoformat())
 
-    # 1) Extract using selectors
-        for field, sel in cfg.detail_selectors.items():
-            if field.startswith("_"):
-                continue
-            el = soup.select_one(sel)
-            if not el:
-                continue
-            text = el.get_text(strip=True)
+        sel = cfg.detail_selectors or {}
+        def pick(selector: Optional[str]) -> Optional[str]:
+            if not selector:
+                return None
+            el = soup.select_one(selector)
+            return el.get_text(" ", strip=True) if el else None
 
-            if field == "area":
-                listing.area = self._normalize_area(text)
-            elif field == "price":
-                listing.price = self._normalize_price(text)
-            elif field in ["bedrooms", "bathrooms"]:
-                listing.__dict__[field] = self._extract_number(text)
-            else:
-                listing.__dict__[field] = text
+        listing.title = pick(sel.get("title"))
+        listing.address = pick(sel.get("address"))
+        listing.description = pick(sel.get("description"))
 
-    # 2) Fallbacks for area if still missing
-        if (not listing.area) or (listing.area.get("sqm") in (None, 0)):
-            area_guess = self._extract_area_from_soup(soup)
-            if area_guess:
-                listing.area = area_guess
+        price_txt = pick(sel.get("price"))
+        if price_txt:
+            listing.price = self._normalize_price(price_txt)
 
-    # 3) Last-resort regex from description
-        if (not listing.area or not listing.area.get("sqm")) and listing.description:
-            m = re.search(r"(\d+\.?\d*)\s*sqm", listing.description, re.IGNORECASE)
-            if m:
-                sqm_val = float(m.group(1))
-                listing.area = {"raw": f"{sqm_val} sqm", "sqm": sqm_val}
+        area_txt = pick(sel.get("area"))
+        if area_txt:
+            listing.area = self._normalize_area(area_txt)
+
+        for f in ["bedrooms", "bathrooms"]:
+            txt = pick(sel.get(f))
+            if txt:
+                setattr(listing, f, self._extract_number(txt))
+
+        published_txt = pick(sel.get("published_at_text"))
+        if published_txt:
+            listing.__dict__["published_at_text"] = published_txt
+            listing.__dict__["published_at"] = self._parse_published_at(published_txt)
+
+        # portal-specific type if available
+        pt = pick(sel.get("property_type"))
+        if pt:
+            listing.__dict__["property_type"] = pt
 
         return listing
 
-
-    ter = SupabaseWriter(batch_size=100)
-
-for listing in listings:  # after parsing each detail
-    payload = {
-        "url": listing.url,
-        "listing_title": listing.title,
-        "price_json": listing.price,
-        "area_json": listing.area,
-        "address": listing.address,
-        "scraped_at": listing.scraped_at,
-        "source": cfg.portal_name,
-        # optional: normalize price_php/area_sqm/ppsqm here
-    }
-    writer.add(payload)
-
-# after all pages
-writer.close()
-
-    def detail_extraction_stage(self, listing_urls, cfg):
+    # --- Details runner --------------------------------------------
+    def detail_extraction_stage(self, listing_urls: List[str], cfg: "ScrapingConfig") -> int:
         self.logger.info(f"Starting detail extraction for {cfg.portal_name} with {len(listing_urls)} URLs")
         if not listing_urls:
             self.logger.warning("No URLs to process; did discovery run?")
             return 0
 
-    # NEW: Supabase batch writer (100-per batch by default)
-        writer_db = SupabaseWriter(batch_size=100, retries=3)
-
         processed_file = self.dirs["staged"] / f"{cfg.portal_name}_processed.txt"
         processed = set()
         if processed_file.exists():
-            processed |= set(line.strip() for line in open(processed_file, encoding="utf-8"))
+            processed |= {line.strip() for line in open(processed_file, encoding="utf-8")}
 
         out_file = self.dirs["staged"] / f"{cfg.portal_name}_listings.jsonl"
         failed_file = self.dirs["staged"] / f"{cfg.portal_name}_failed.txt"
 
         success = fail = 0
-        mode = cfg.scraping_mode.lower()
-
-        with jsonlines.open(out_file, "a") as writer_jsonl, open(processed_file, "a", encoding="utf-8") as done:
+        with jsonlines.open(out_file, "a") as writer, open(processed_file, "a", encoding="utf-8") as done:
             for idx, u in enumerate(listing_urls, 1):
                 if u in processed:
                     continue
+                self.logger.info(f"[{idx}/{len(listing_urls)}] detail -> {u}")
 
-            # --- per-URL retry loop ---
-                max_attempts = 3
-                attempt = 0
                 html = None
-
-                while attempt < max_attempts and html is None:
-                    attempt += 1
-                    self.logger.info(f"[{idx}/{len(listing_urls)}] Fetch {u} (attempt {attempt}/{max_attempts})")
-                    html = self._with_watchdog(
-                        lambda: self._fetch_or_cache(u, f"{cfg.portal_name}_detail", cfg),
-                        timeout_s=70,
-                        mode=mode
-                    )
-                    if html is None:
-                        time.sleep(1.0 * attempt)  # brief backoff
+                for attempt in range(1, cfg.max_retries + 1):
+                    html = self._get_page_content(u, cfg)
+                    if html:
+                        break
+                    time.sleep(min(2 ** attempt, 8))
 
                 if not html:
                     fail += 1
                     with open(failed_file, "a", encoding="utf-8") as ff:
                         ff.write(u + "\n")
                     continue
-            # --- end per-URL retry loop ---
 
                 try:
                     listing = self._parse_listing(html, u, cfg)
+                    if not is_dataclass(listing):
+                        raise ValueError("parse returned non-dataclass")
+                    writer.write(asdict(listing))
+                    done.write(u + "\n")
+                    success += 1
                 except Exception as e:
                     self.logger.warning(f"Parse error for {u}: {e}")
                     fail += 1
                     with open(failed_file, "a", encoding="utf-8") as ff:
                         ff.write(u + "\n")
-                    continue
 
-                from dataclasses import is_dataclass, asdict
-                if not is_dataclass(listing):
-                    self.logger.warning(
-                        f"_parse_listing did not return a dataclass for {u} "
-                        f"(got {type(listing).__name__}); skipping."
-                    )
-                    fail += 1
-                    with open(failed_file, "a", encoding="utf-8") as ff:
-                        ff.write(u + "\n")
-                    continue
+                time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.7))
 
-            # Write JSONL backup
-                writer_jsonl.write(asdict(listing))
-                done.write(u + "\n")
-
-            # --- Build normalized payload for DB ---
-                def _num(x):
-                    try:
-                        return float(x)
-                    except Exception:
-                        return None
-
-                price_php = None
-                if listing.price and isinstance(listing.price, dict):
-                    if (listing.price.get("currency") in (None, "PHP")) and listing.price.get("value") is not None:
-                        price_php = _num(listing.price["value"])
-
-                area_sqm = None
-                if listing.area and isinstance(listing.area, dict):
-                    area_sqm = _num(listing.area.get("sqm"))
-
-                price_per_sqm = None
-                if price_php is not None and area_sqm and area_sqm > 0:
-                    price_per_sqm = price_php / area_sqm
-
-                payload = {
-                    "url": listing.url,
-                    "listing_title": listing.title,
-                    "property_type": None,                 # fill if you parse it
-                    "address": listing.address,
-                    "price_php": price_php,
-                    "area_sqm": area_sqm,
-                    "price_per_sqm": price_per_sqm,
-                    "price_json": listing.price or None,   # jsonb in PG
-                    "area_json": listing.area or None,     # jsonb in PG
-                    "scraped_at": listing.scraped_at,      # ISO string OK for timestamptz
-                    "source": cfg.portal_name,
-                }
-
-            # NEW: enqueue for batched upsert to Supabase
-                writer_db.add(payload)
-
-            # Optional: flush periodically (belt-and-suspenders)
-                if idx % 50 == 0:
-                    writer_db.flush()
-
-                success += 1
-
-            # politeness / anti-fingerprint jitter
-                time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
-
-    # NEW: ensure last partial batch is sent
-        writer_db.close()
-
-        self.logger.info(f"Details complete {cfg.portal_name} — success:{success} fail:{fail}")
+        self.logger.info(f"Details done {cfg.portal_name}: {success} rows (fail {fail})")
         return success
-
-
-    # --- Normalization --------------------------------------------
-    def _normalize_price(self, txt: str) -> dict:
-    
-        raw = (txt or "").strip()
-        lower = raw.lower()
-
-    # currency detection
-        currency = None
-        if "₱" in raw or "php" in lower or "ph₱" in lower:
-            currency = "PHP"
-        elif "usd" in lower or "$" in raw:
-            currency = "USD"
-        elif "eur" in lower or "€" in raw:
-            currency = "EUR"
-
-    # amount extraction: keep digits and dot, drop commas/spaces
-        digits = re.sub(r"[^\d.]", "", raw.replace(",", ""))
-        value = None
-        if digits:
-            try:
-                value = float(digits)
-            except ValueError:
-                value = None
-
-    # period detection
-        period = None
-        if any(k in lower for k in ["per month", "/ month", "/month", "monthly", "/ mo", "/mo"]):
-            period = "month"
-        elif any(k in lower for k in ["per year", "/ year", "/year", "yearly", "annum", "p.a"]):
-            period = "year"
-        elif any(k in lower for k in ["per week", "/ week", "/week", "weekly"]):
-            period = "week"
-        elif any(k in lower for k in ["per day", "/ day", "/day", "daily"]):
-            period = "day"
-
-        return {"raw": raw, "currency": currency, "value": value, "period": period}
-
-
-    def _normalize_area(self, txt: str) -> dict:
-        """
-        Normalize to sqm where possible.
-        Handles: '184 sqm', '184 m²', '184 m2', '184 square meters', '1,000 sq ft'
-        """
-        raw = (txt or "").strip()
-        if not raw:
-            return {"raw": raw, "sqm": None}
-
-        lower = raw.lower()
-
-    # Prefer explicit sqm/m² first
-        m = re.search(r"(\d+(?:[\.,]\d+)?)\s*(m²|m2|sqm|sq\.?\s*m(?:eters?)?)", lower, flags=re.I)
-        if m:
-            val = float(m.group(1).replace(",", ""))
-            return {"raw": raw, "sqm": val}
-
-    # sq ft → sqm
-        ft = re.search(r"(\d+(?:[\.,]\d+)?)\s*(sq\.?\s*ft|ft²|ft2|square\s*feet)", lower, flags=re.I)
-        if ft:
-            ft_val = float(ft.group(1).replace(",", ""))
-            sqm = round(ft_val * 0.092903, 2)
-            return {"raw": raw, "sqm": sqm}
-
-    # Fallback: first number, assume sqm (conservative)
-        n = re.search(r"(\d+(?:[\.,]\d+)?)", lower)
-        if n:
-            try:
-                val = float(n.group(1).replace(",", ""))
-                return {"raw": raw, "sqm": val}
-            except Exception:
-                pass
-
-        return {"raw": raw, "sqm": None}
-
-
-    def _extract_number(self, txt: str) -> Optional[int]:
-        m = re.search(r"\d+", txt)
-        return int(m.group()) if m else None
 
     # --- Cleanup ---------------------------------------------------
     def __del__(self):
         try:
-            if self._selenium_driver: self._selenium_driver.quit()
-            if self._pw_browser: self._pw_browser.close()
-            if self._pw: self._pw.stop()
-        except: pass
+            if getattr(self, "_pw_browser", None):
+                self._pw_browser.close()
+            if getattr(self, "_pw", None):
+                self._pw.stop()
+        except Exception:
+            pass
+    def _page_url(self, seed: str, page: int) -> str:
+        """Return seed with its page query param set to page (add or replace)."""
+        parts = urlsplit(seed)
+        q = dict(parse_qsl(parts.query, keep_blank_values=True))
+        q["page"] = str(page)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
+    
+    def _clean_text(self, s: Optional[str]) -> Optional[str]:
+        if not s:
+            return s
+        s = s.strip()
+        # common mojibake fix (₱ sign)
+        s = s.replace("â‚±", "₱")
+        # normalize whitespace
+        s = re.sub(r"\s+", " ", s)
+        return s
 
-    def _with_watchdog(self, fn, timeout_s=60, mode: str = "requests"):
-        if mode == "playwright":
-        # rely on Playwright's own timeouts set in _fetch_with_playwright
-            try:
-                return fn()
-            except Exception:
-                return None
+   
         
-        import threading
-        result = {"val": None}; err = {"exc": None}
-        def runner():
-            try: result["val"] = fn()
-            except Exception as e: err["exc"] = e
-        t = threading.Thread(target=runner, daemon=True)
-        t.start(); t.join(timeout_s)
-        if t.is_alive():
-            self.logger.warning("Watchdog timeout; skipping URL")
-            return None
-        if err["exc"]:
-            self.logger.warning(f"Worker error: {err['exc']}")
-            return None
-        return result["val"]
-    def _extract_area_from_soup(self, soup: BeautifulSoup) -> Optional[dict]:
-        """
-        Try multiple strategies to get area:
-        - explicit Lamudi attributes (data-test="area-value", "floor-area-value")
-        - generic area labels in spec blocks
-        - JSON-LD (floorSize.value)
-        - free-text fallback regex anywhere in left-details / description
-        Returns dict: {"raw": <str>, "sqm": <float>} or None
-        """
-        # A) Strong, site-specific selectors
-        candidates = [
-            "[data-test='area-value']",
-            "[data-test='floor-area-value']",
-            ".details-item-value[data-test*='area']",
-            ".place-features__values[data-test*='area']",
-            ".place-details .details-item-value",           # sometimes area appears here
-            ".left-details .place-features .floor-area .place-features__values",
-        ]
-        for sel in candidates:
-            el = soup.select_one(sel)
-            if el:
-                norm = self._normalize_area(el.get_text(" ", strip=True))
-                if norm and norm.get("sqm"):
-                    return norm
-
-    # B) Label:value pattern inside features cards
-    #   e.g., "Usable area: 184 sqm" / "Floor area: 100 m²"
-        for block in soup.select(".place-features .spec, .place-details .details-item"):
-            text = block.get_text(" ", strip=True)
-            if not text:
-                continue
-        # quick filter
-            if "area" in text.lower():
-                norm = self._normalize_area(text)
-                if norm and norm.get("sqm"):
-                    return norm
-
-    # C) JSON-LD <script type="application/ld+json">
-    #    Look for floorSize.value or area, depending on publisher
-        for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-            try:
-                import json as _json
-                data = _json.loads(script.string or "")
-                # sometimes it's a list
-                objs = data if isinstance(data, list) else [data]
-                for obj in objs:
-                    floor = obj.get("floorSize") or obj.get("area")
-                    if isinstance(floor, dict):
-                        val = floor.get("value")
-                        unit = (floor.get("unitCode") or floor.get("unitText") or "").lower()
-                        if isinstance(val, (int, float)):
-                            # assume m2 if unspecified
-                            sqm = float(val)
-                            # basic ft2 to m2 conversion if indicated
-                            if "ft" in unit or "sq ft" in unit or unit == "ftk":
-                                sqm = sqm * 0.092903
-                            return {"raw": f"{val} {unit}".strip(), "sqm": round(sqm, 2)}
-            except Exception:
-                pass
-
-    # D) Free-text fallback in the main content
-        host = soup.select_one(".left-details") or soup.select_one("main") or soup
-        txt = host.get_text(" ", strip=True) if host else soup.get_text(" ", strip=True)
-        m = re.search(r"(\d+(?:[\.,]\d+)?)\s*(m²|m2|sqm|sq\.?\s*m(?:eters)?)", txt, flags=re.I)
-        if m:
-            num = float(m.group(1).replace(",", ""))
-            return {"raw": f"{num} {m.group(2)}", "sqm": num}
-
-    # E) As a last resort, look for square feet and convert
-        m2 = re.search(r"(\d+(?:[\.,]\d+)?)\s*(sq\.?\s*ft|ft²|ft2)", txt, flags=re.I)
-        if m2:
-            num = float(m2.group(1).replace(",", ""))
-            sqm = round(num * 0.092903, 2)
-            return {"raw": f"{num} sq ft", "sqm": sqm}
-
-        return None
-
-
-
-
-
-
-
-

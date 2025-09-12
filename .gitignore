@@ -1,15 +1,4 @@
-# secrets
-.env
-*.env
-
-# mac/win/editor noise
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-# logs & debug artifacts
+﻿scraper_output/
 *.log
-logs/
-scraper_output/
-playwright-report/
+*.sqlite
+.env
