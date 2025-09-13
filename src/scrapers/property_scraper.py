@@ -99,12 +99,6 @@ class PropertyScraper:
             "staged": self.base_dir / "staged",
             "logs": self.base_dir / "logs",
         }
-        for cfg in self.configs:
-            # apply env overrides
-            cfg.scraping_mode = get_env_scrape_mode(cfg.scraping_mode)
-            cfg.rate_limit_delay = get_env_rate_limit_delay(cfg.rate_limit_delay)
-        self.max_listings = get_env_max_listings()
-
         for d in self.dirs.values():
             d.mkdir(parents=True, exist_ok=True)
 
@@ -117,43 +111,56 @@ class PropertyScraper:
         )
         self.logger = logging.getLogger("scraper")
 
-        # load configs
+        # ---------------- load portal configs FIRST ----------------
         with open(config_path, "r", encoding="utf-8") as f:
             cfg_json = json.load(f)
-        
-        self.configs = [ScrapingConfig(**pc) for pc in cfg_json.get("portals", [])]
-        
-        # --- apply env overrides (if any)
+
+        portals = cfg_json.get("portals", cfg_json)
+        if isinstance(portals, dict):
+            portals = [portals]
+        if not isinstance(portals, list):
+            raise ValueError("Invalid portals.json: expected list or {'portals': [...]}")
+
+        self.configs = [ScrapingConfig(**pc) for pc in portals]
+
+        # --------------- env helpers (fallbacks if module missing) ---------------
         try:
             from src.utils.config import (
                 get_env_scrape_mode,
                 get_env_rate_limit_delay,
-                get_env_max_listings,  # used later by discovery, not here
+                get_env_max_listings,
             )
         except ModuleNotFoundError:
             import os
-            def get_env_scrape_mode(default="requests"): return os.getenv("SCRAPING_MODE", default).lower()
+            def get_env_scrape_mode(default="requests"):
+                return os.getenv("SCRAPING_MODE", default).lower()
             def get_env_rate_limit_delay(default=1.0):
                 try: return float(os.getenv("RATE_LIMIT_DELAY", default))
                 except ValueError: return default
             def get_env_max_listings(default=0):
                 try: return int(os.getenv("MAX_LISTINGS", str(default)))
                 except ValueError: return default
-        
-        env_mode = get_env_scrape_mode(None)
+
+        # --------------- apply env overrides to each config ----------------
+        env_mode  = get_env_scrape_mode(None)          # None => don't override if unset
         env_delay = get_env_rate_limit_delay(None)
-        
+
         if env_mode:
             for c in self.configs:
                 c.scraping_mode = env_mode
-        
         if env_delay is not None:
             for c in self.configs:
                 c.rate_limit_delay = env_delay
-                
-        self.logger.info("Loaded %d portal configs: %s",
-                 len(self.configs),
-                 [c.portal_name for c in self.configs])
+
+        # discovery will read this
+        self.max_listings = get_env_max_listings()
+
+        self.logger.info(
+            "Loaded %d portal configs: %s",
+            len(self.configs), [c.portal_name for c in self.configs]
+        )
+
+        # ---- (rest of your init: requests session, playwright/selenium, etc.) ----
         
 
 
@@ -581,6 +588,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
