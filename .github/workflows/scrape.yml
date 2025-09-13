@@ -40,6 +40,10 @@ jobs:
           python -c "import importlib, sys; sys.exit(0 if importlib.util.find_spec('playwright') else 1)" \
             && python -m playwright install --with-deps chromium || true
 
+      - name: Install Playwright browsers
+        run: |
+            python -m playwright install --with-deps chromium    
+
       - name: Discovery (lamudi_cebu)
         run: |
           python -m src.runner.run_discovery --portal lamudi_cebu
