@@ -23,7 +23,7 @@ def main():
     allowed = {
         "url", "listing_title", "property_type", "address",
         "price_php", "area_sqm", "price_per_sqm",
-        "price_json", "area_json", "scraped_at", "source",
+        "price_json", "area_json", "scraped_at", "published_at", "source",
     }
 
     sent = 0
