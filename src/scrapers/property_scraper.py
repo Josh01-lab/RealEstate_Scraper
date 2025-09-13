@@ -358,45 +358,90 @@ class PropertyScraper:
             return None
 
     # --- Listing detail parse -------------------------------------
-    def _parse_listing(self, html: str, url: str, cfg: "ScrapingConfig") -> "ListingData":
+    def _parse_listing(self, html: str, url: str, cfg: ScrapingConfig) -> Dict[str, Any]:
         soup = BeautifulSoup(html, "lxml")
-        listing = ListingData(url=url, scraped_at=datetime.now(timezone.utc).isoformat())
-
         sel = cfg.detail_selectors or {}
-        def pick(selector: Optional[str]) -> Optional[str]:
-            if not selector:
+    
+        def tx(css: str) -> Optional[str]:
+            if not css:
                 return None
-            el = soup.select_one(selector)
-            return el.get_text(" ", strip=True) if el else None
+            el = soup.select_one(css)
+            if not el:
+                return None
+            # prefer datetime attribute for <time> when present
+            if el.name == "time" and el.get("datetime"):
+                return el.get("datetime")
+            return (el.get_text(" ", strip=True) or None)
+    
+        title = tx(sel.get("title"))
+        address = tx(sel.get("address"))
+        property_type = tx(sel.get("property_type"))
+        description = tx(sel.get("description"))
+    
+        # price parsing (keep your current logic if you already have it)
+        price_raw = tx(sel.get("price"))
+        price_dict = None
+        if price_raw:
+            # super simple normalization; keep your richer version if you have one
+            m = re.search(r"([\d,]+(?:\.\d+)?)", price_raw)
+            val = float(m.group(1).replace(",", "")) if m else None
+            cur = "PHP" if "₱" in price_raw or "PHP" in price_raw.upper() else None
+            period = "month" if "month" in price_raw.lower() else None
+            price_dict = {"raw": price_raw, "currency": cur, "value": val, "period": period}
+    
+        # area parsing
+        area_raw = tx(sel.get("area"))
+        area_dict = None
+        if area_raw:
+            m2 = re.search(r"([\d,]+(?:\.\d+)?)\s*sq?m", area_raw, re.I)
+            sqm = float(m2.group(1).replace(",", "")) if m2 else None
+            area_dict = {"raw": area_raw, "sqm": sqm}
+    
+        # --- published_at parsing ---
+        published_at_iso: Optional[str] = None
+    
+        # 1) first: try a proper <time datetime="...">
+        t_el = soup.select_one("time[itemprop='datePublished'], time[datetime]")
+        if t_el and t_el.get("datetime"):
+            try:
+                dt = dtparse.parse(t_el["datetime"])
+                if not dt.tzinfo:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                published_at_iso = self._dt_to_iso(dt)
+            except Exception:
+                published_at_iso = None
+    
+        # 2) otherwise: try your configured text container and parse relative phrase
+        if not published_at_iso:
+            rel_text = tx(sel.get("published_at_text"))
+            # If it looks like a full date, parse directly; else try relative
+            if rel_text:
+                parsed = None
+                try:
+                    # Attempt absolute date first (e.g., "12 Sep 2023")
+                    parsed_dt = dtparse.parse(rel_text, fuzzy=True, dayfirst=False)
+                    if parsed_dt:
+                        if not parsed_dt.tzinfo:
+                            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+                        parsed = self._dt_to_iso(parsed_dt)
+                except Exception:
+                    parsed = None
+                if not parsed:
+                    parsed = self._parse_relative_published(rel_text)
+                published_at_iso = parsed
+    
+        return {
+            "url": url,
+            "title": title,
+            "address": address,
+            "property_type": property_type,
+            "description": description,
+            "price": price_dict,
+            "area": area_dict,
+            "published_at": published_at_iso,
+            "scraped_at": datetime.now(timezone.utc).isoformat(),
+        }
 
-        listing.title = pick(sel.get("title"))
-        listing.address = pick(sel.get("address"))
-        listing.description = pick(sel.get("description"))
-
-        price_txt = pick(sel.get("price"))
-        if price_txt:
-            listing.price = self._normalize_price(price_txt)
-
-        area_txt = pick(sel.get("area"))
-        if area_txt:
-            listing.area = self._normalize_area(area_txt)
-
-        for f in ["bedrooms", "bathrooms"]:
-            txt = pick(sel.get(f))
-            if txt:
-                setattr(listing, f, self._extract_number(txt))
-
-        published_txt = pick(sel.get("published_at_text"))
-        if published_txt:
-            listing.__dict__["published_at_text"] = published_txt
-            listing.__dict__["published_at"] = self._parse_published_at(published_txt)
-
-        # portal-specific type if available
-        pt = pick(sel.get("property_type"))
-        if pt:
-            listing.__dict__["property_type"] = pt
-
-        return listing
 
     # --- Details runner --------------------------------------------
     def detail_extraction_stage(self, listing_urls: List[str], cfg: "ScrapingConfig") -> int:
@@ -477,7 +522,30 @@ class PropertyScraper:
         s = re.sub(r"\s+", " ", s)
         return s
 
+    def _dt_to_iso(self, dt: datetime) -> str:
+        return dt.astimezone(timezone.utc).isoformat()
+    
+    def _parse_relative_published(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        m = _REL_RE.search(text)
+        if not m:
+            return None
+        parts = {k: int(v) for k, v in m.groupdict().items() if v}
+        if not parts:
+            return None
+        # build a timedelta (years/months are approximated)
+        days = parts.get("days", 0) + parts.get("weeks", 0) * 7 + parts.get("months", 0) * 30 + parts.get("years", 0) * 365
+        td = timedelta(
+            days=days,
+            hours=parts.get("hours", 0),
+            minutes=parts.get("minutes", 0),
+        )
+        published = datetime.now(timezone.utc) - td
+        return self._dt_to_iso(published)
+
    
         
+
 
 
