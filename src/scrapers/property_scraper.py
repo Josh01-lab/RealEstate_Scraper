@@ -121,7 +121,7 @@ class PropertyScraper:
         if not isinstance(portals, list):
             raise ValueError("Invalid portals.json: expected list or {'portals': [...]}")
 
-        self.configs = [ScrapingConfig(**pc) for pc in cfg_json.get("portals", []]
+        self.configs = [ScrapingConfig(**pc) for pc in cfg_json.get("portals", [])]
 
         # --------------- env helpers (fallbacks if module missing) ---------------
         try:
@@ -587,6 +587,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
