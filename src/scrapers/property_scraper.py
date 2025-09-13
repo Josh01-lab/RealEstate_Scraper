@@ -156,17 +156,19 @@ class PropertyScraper:
 
 
         # --------------- apply env overrides to each config ----------------
-        env_mode  = get_env_scrape_mode(None)
-        env_delay = get_env_rate_limit_delay(None)
-        self.max_listings = get_env_max_listings(0)
+        env_mode  = get_env_scrape_mode()
+        env_delay = get_env_rate_limit_delay()
+        env_max = get_env_max_listings()
         
-        if env_mode is not None:
+        if env_mode:
             for c in self.configs:
                 c.scraping_mode = env_mode
         
-        if env_delay is not None:
+        if env_delay:
             for c in self.configs:
                 c.rate_limit_delay = env_delay
+                
+        self.max_listings = env_max       
 
         self.logger.info(
             "Loaded %d portal configs: %s",
@@ -601,6 +603,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
