@@ -1,66 +1,68 @@
-name: Nightly scrape (Lamudi Cebu)
+name: Nightly Lamudi Cebu Scrape
 
 on:
-  schedule:
-    - cron: "0 19 * * *" # 16:00 UTC = 3:00 a.m PH (+8). Adjust as you like.
   workflow_dispatch:
+  schedule:
+    # 3:00 AM Asia/Manila = 19:00 UTC the previous day
+    - cron: "0 19 * * *"
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    env:
+      # Scraper knobs for CI
+      SCRAPING_MODE: playwright
+      RATE_LIMIT_DELAY: "1.0"
+      MAX_PAGES: "1"
+      MAX_LISTINGS: "0"        # set "0" to remove the hard cap
+      LOG_LEVEL: INFO
+      PORTALS_CONFIG: ./config/portals.json
+
+      # DB (pulled from repo/environment secrets)
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install system deps for Playwright
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libxkbcommon0 libgtk-3-0 libdrm2 libgbm1
-
-      - name: Install Python deps
+      - name: Install dependencies
         run: |
           python -m pip install -U pip
-          pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # Ensure Playwright + Chromium are installed for headless scraping
+          python -c "import importlib, sys; sys.exit(0 if importlib.util.find_spec('playwright') else 1)" \
+            && python -m playwright install --with-deps chromium || true
 
-      - name: Set env
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          echo "SUPABASE_URL set"
-          echo "SUPABASE_SERVICE_ROLE_KEY set"
-
-      - name: Run discovery
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          MAX_PAGES: "0"
-          SCRAPING_MODE: "playwright"
-          RATE_LIMIT_DELAY: "1.2"
-          MAX_LISTINGS: "0"
+      - name: Discovery (lamudi_cebu)
         run: |
           python -m src.runner.run_discovery --portal lamudi_cebu
 
       - name: Capture run dir
-        id: rundir
+        id: disco
+        shell: bash
         run: |
-          echo "dir=$(ls -1d scraper_output/run_* | tail -n1)" >> $GITHUB_OUTPUT
+          set -e
+          latest=$(ls -1d scraper_output/run_* | tail -n1)
+          echo "RUN_DIR=$latest" >> "$GITHUB_OUTPUT"
+          echo "Captured RUN_DIR: $latest"
 
-      - name: Details
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SCRAPING_MODE: "playwright"
+      - name: Details (lamudi_cebu)
         run: |
-          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
+          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.disco.outputs.RUN_DIR }}"
 
       - name: Publish to Supabase
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
+          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.disco.outputs.RUN_DIR }}"
+
+      # Optional: quick sanity log (doesn't fail the job if it can't query)
+      - name: Sanity echo staged head
+        continue-on-error: true
+        run: |
+          head -n 5 "${{ steps.disco.outputs.RUN_DIR }}/staged/lamudi_cebu_listings.jsonl" || true
