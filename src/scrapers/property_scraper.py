@@ -358,7 +358,7 @@ class PropertyScraper:
             return None
 
     # --- Listing detail parse -------------------------------------
-    def _parse_listing(self, html: str, url: str, cfg: ScrapingConfig) -> Dict[str, Any]:
+    def _parse_listing(self, html: str, url: str, cfg: ScrapingConfig) -> Dict[str, any]:
         soup = BeautifulSoup(html, "lxml")
         sel = cfg.detail_selectors or {}
     
@@ -546,6 +546,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
