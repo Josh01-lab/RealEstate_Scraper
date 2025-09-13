@@ -150,6 +150,11 @@ class PropertyScraper:
         if env_delay is not None:
             for c in self.configs:
                 c.rate_limit_delay = env_delay
+                
+        self.logger.info("Loaded %d portal configs: %s",
+                 len(self.configs),
+                 [c.portal_name for c in self.configs])
+        
 
 
         # requests session with retries
@@ -576,6 +581,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
