@@ -86,6 +86,12 @@ class ListingData:
     bathrooms: Optional[int] = None
     description: Optional[str] = None
     scraped_at: Optional[str] = None
+    
+from src.utils.config import (
+    get_env_scrape_mode,
+    get_env_rate_limit_delay,
+    get_env_max_listings,
+)
 
 
 class PropertyScraper:
@@ -97,6 +103,12 @@ class PropertyScraper:
             "staged": self.base_dir / "staged",
             "logs": self.base_dir / "logs",
         }
+        for cfg in self.configs:
+            # apply env overrides
+            cfg.scraping_mode = get_env_scrape_mode(cfg.scraping_mode)
+            cfg.rate_limit_delay = get_env_rate_limit_delay(cfg.rate_limit_delay)
+        self.max_listings = get_env_max_listings()
+
         for d in self.dirs.values():
             d.mkdir(parents=True, exist_ok=True)
 
@@ -546,6 +558,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
