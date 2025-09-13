@@ -38,7 +38,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          MAX_PAGES: "1"
+          MAX_PAGES: "0"
           SCRAPING_MODE: "playwright"
         run: |
           python -m src.runner.run_discovery --portal lamudi_cebu
