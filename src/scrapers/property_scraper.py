@@ -10,7 +10,7 @@ from dateutil import parser as dtparse
 import requests, jsonlines
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
-from src.config import MAX_PAGES as ENV_MAX_PAGES, RATE_LIMIT_DELAY as ENV_RATE_DELAY, SCRAPING_MODE as ENV_SCRAPE_MODE
+from src.config import MAX_PAGES as RATE_LIMIT_DELAY as ENV_RATE_DELAY, SCRAPING_MODE as ENV_SCRAPE_MODE
 
 
 
@@ -444,3 +444,4 @@ class PropertyScraper:
 
    
         
+
