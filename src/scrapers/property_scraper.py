@@ -11,7 +11,11 @@ import requests, jsonlines
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
 from src.config import MAX_PAGES, SCRAPING_MODE
-
+from src.utils.config import (
+    get_env_scrape_mode,
+    get_env_rate_limit_delay,
+    get_env_max_listings,
+)
 
 
 
@@ -87,11 +91,6 @@ class ListingData:
     description: Optional[str] = None
     scraped_at: Optional[str] = None
     
-from src.utils.config import (
-    get_env_scrape_mode,
-    get_env_rate_limit_delay,
-    get_env_max_listings,
-)
 
 
 class PropertyScraper:
@@ -558,6 +557,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
