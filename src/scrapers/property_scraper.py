@@ -119,15 +119,37 @@ class PropertyScraper:
 
         # load configs
         with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        self.configs = [ScrapingConfig(**pc) for pc in cfg.get("portals", [])]
-        for cfg in self.configs:
-            if ENV_SCRAPE_MODE:
-                cfg.scraping_mode = ENV_SCRAPE_MODE
-            # page cap should be a HARD upper bound
-            cfg.max_pages = min(cfg.max_pages, ENV_MAX_PAGES)
-            # never run faster than the global delay
-            cfg.rate_limit_delay = max(cfg.rate_limit_delay, ENV_RATE_DELAY)
+            cfg_json = json.load(f)
+        
+        self.configs = [ScrapingConfig(**pc) for pc in cfg_json.get("portals", [])]
+        
+        # --- apply env overrides (if any)
+        try:
+            from src.utils.config import (
+                get_env_scrape_mode,
+                get_env_rate_limit_delay,
+                get_env_max_listings,  # used later by discovery, not here
+            )
+        except ModuleNotFoundError:
+            import os
+            def get_env_scrape_mode(default="requests"): return os.getenv("SCRAPING_MODE", default).lower()
+            def get_env_rate_limit_delay(default=1.0):
+                try: return float(os.getenv("RATE_LIMIT_DELAY", default))
+                except ValueError: return default
+            def get_env_max_listings(default=0):
+                try: return int(os.getenv("MAX_LISTINGS", str(default)))
+                except ValueError: return default
+        
+        env_mode = get_env_scrape_mode(None)
+        env_delay = get_env_rate_limit_delay(None)
+        
+        if env_mode:
+            for c in self.configs:
+                c.scraping_mode = env_mode
+        
+        if env_delay is not None:
+            for c in self.configs:
+                c.rate_limit_delay = env_delay
 
 
         # requests session with retries
@@ -554,6 +576,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
