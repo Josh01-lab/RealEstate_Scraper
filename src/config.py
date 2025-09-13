@@ -16,8 +16,10 @@ SQLITE_DB    = os.getenv("SQLITE_DB", str(ROOT / "data" / "db" / "central.db"))
 
 # scraper tunables
 MAX_PAGES        = int(os.getenv("MAX_PAGES", "200"))
-RATE_LIMIT_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "1.0"))
-SCRAPING_MODE    = os.getenv("SCRAPING_MODE", "").strip()  # optional override
+ENV_SCRAPE_MODE = os.getenv("SCRAPING_MODE", "default")
+ENV_RATE_DELAY = float(os.getenv("RATE_LIMIT_DELAY", "1.0"))
+MAX_LISTINGS = int(os.getenv("MAX_LISTINGS", "0"))
+MAX_PAGES = int(os.getenv("MAX_PAGES", "999"))  # safety upper bound
 PORTALS_CONFIG   = os.getenv("PORTALS_CONFIG", str(ROOT / "config" / "portals.json"))
 
 # logging
