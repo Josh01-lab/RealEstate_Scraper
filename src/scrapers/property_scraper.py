@@ -142,18 +142,18 @@ class PropertyScraper:
                 except ValueError: return default
 
         # --------------- apply env overrides to each config ----------------
-        env_mode  = get_env_scrape_mode(None)          # None => don't override if unset
+        env_mode  = get_env_scrape_mode(None)
         env_delay = get_env_rate_limit_delay(None)
-
-        if env_mode:
+        
+        if env_mode is not None:
             for c in self.configs:
                 c.scraping_mode = env_mode
+        
         if env_delay is not None:
             for c in self.configs:
                 c.rate_limit_delay = env_delay
-
         # discovery will read this
-        self.max_listings = get_env_max_listings()
+        self.max_listings = get_env_max_listings(0)
 
         self.logger.info(
             "Loaded %d portal configs: %s",
@@ -588,6 +588,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
