@@ -131,15 +131,29 @@ class PropertyScraper:
                 get_env_max_listings,
             )
         except ModuleNotFoundError:
-            import os
-            def get_env_scrape_mode(default="requests"):
-                return os.getenv("SCRAPING_MODE", default).lower()
-            def get_env_rate_limit_delay(default=1.0):
-                try: return float(os.getenv("RATE_LIMIT_DELAY", default))
-                except ValueError: return default
-            def get_env_max_listings(default=0):
-                try: return int(os.getenv("MAX_LISTINGS", str(default)))
-                except ValueError: return default
+            
+            def get_env_scrape_mode(default="requests") -> str:
+                val = os.getenv("SCRAPING_MODE")
+                return (val or default).lower()
+            
+            def get_env_rate_limit_delay(default=1.0) -> float:
+                val = os.getenv("RATE_LIMIT_DELAY")
+                if val is None:
+                    return float(default)
+                try:
+                    return float(val)
+                except (TypeError, ValueError):
+                    return float(default)
+            
+            def get_env_max_listings(default=0) -> int:
+                val = os.getenv("MAX_LISTINGS")
+                if val is None:
+                    return int(default)
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    return int(default)
+
 
         # --------------- apply env overrides to each config ----------------
         env_mode  = get_env_scrape_mode(None)
@@ -587,6 +601,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
