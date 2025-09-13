@@ -121,7 +121,7 @@ class PropertyScraper:
         if not isinstance(portals, list):
             raise ValueError("Invalid portals.json: expected list or {'portals': [...]}")
 
-        self.configs = [ScrapingConfig(**pc) for pc in portals]
+        self.configs = [ScrapingConfig(**pc) for pc in cfg_json.get("portals", []]
 
         # --------------- env helpers (fallbacks if module missing) ---------------
         try:
@@ -144,6 +144,7 @@ class PropertyScraper:
         # --------------- apply env overrides to each config ----------------
         env_mode  = get_env_scrape_mode(None)
         env_delay = get_env_rate_limit_delay(None)
+        self.max_listings = get_env_max_listings(0)
         
         if env_mode is not None:
             for c in self.configs:
@@ -152,8 +153,6 @@ class PropertyScraper:
         if env_delay is not None:
             for c in self.configs:
                 c.rate_limit_delay = env_delay
-        # discovery will read this
-        self.max_listings = get_env_max_listings(0)
 
         self.logger.info(
             "Loaded %d portal configs: %s",
@@ -588,6 +587,7 @@ class PropertyScraper:
 
    
         
+
 
 
 
