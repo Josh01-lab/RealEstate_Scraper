@@ -160,55 +160,90 @@ class PropertyScraper:
             return None
         
     def url_discovery_routine(self, cfg: "ScrapingConfig") -> List[str]:
+        """Discover listing URLs for a portal, save to staged/<portal>_urls.jsonl (append)."""
+        import os
+    
         self.logger.info(f"Discovery start {cfg.portal_name}")
         urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
         seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
-
-        # optional hard cap by count
+    
+        # Hard cap by count (0 = unlimited)
         MAX_LISTINGS = int(os.getenv("MAX_LISTINGS", "0"))
-
+    
+        # Load prior seen for cross-run dedupe (optional but handy)
+        if seen_file.exists():
+            try:
+                self.seen_urls |= {line.strip() for line in seen_file.read_text(encoding="utf-8").splitlines() if line.strip()}
+            except Exception as e:
+                self.logger.warning(f"Could not read seen file: {seen_file} ({e})")
+    
         all_urls: List[str] = []
         pages = 0
         current = cfg.seed_urls[0]
-
+    
+        # Optional: only accept links from the same hostname as the seed
+        seed_host = urlparse(cfg.seed_urls[0]).netloc
+    
         while current and pages < cfg.max_pages:
             html = self._get_page_content(current, cfg)
             if not html:
                 self.logger.warning(f"No HTML for {current}; stopping pagination.")
                 break
-
+    
             soup = BeautifulSoup(html, "lxml")
-
-            # collect listing URLs
-            found = 0
+    
+            # Collect listing URLs on this page
+            page_urls = set()
             for a in soup.select(cfg.listing_selector):
-                href = a.get("href")
-                if not href:
+                href = (a.get("href") or "").strip()
+                if not href or href.startswith(("javascript:", "mailto:")):
                     continue
                 full = self._canonicalize_url(urljoin(current, href))
-                if full not in self.seen_urls:
-                    # hard-cap by count if requested
-                    if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
-                        current = None  # stop outer loop too
-                        break
-                    with jsonlines.open(urls_out, "a") as w:
-                        w.write({"url": full, "discovered_at": datetime.now(timezone.utc).isoformat()})
-                    self.seen_urls.add(full)
-                    all_urls.append(full)
-                    found += 1
-
-            # next page
+                if not full.startswith(("http://", "https://")):
+                    continue
+                # same-domain guard
+                if urlparse(full).netloc != seed_host:
+                    continue
+                page_urls.add(full)
+    
+            # Write new ones
+            new_count = 0
+            for full in sorted(page_urls):
+                if full in self.seen_urls:
+                    continue
+                if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
+                    self.logger.info(f"Hit MAX_LISTINGS={MAX_LISTINGS}; stopping discovery.")
+                    current = None  # stop outer loop
+                    break
+                with jsonlines.open(urls_out, "a") as w:
+                    w.write({"url": full, "discovered_at": datetime.now(timezone.utc).isoformat()})
+                self.seen_urls.add(full)
+                all_urls.append(full)
+                new_count += 1
+    
+            # Find "next" page
             nxt_url = None
-            if cfg.pagination_selector:
+            if current and cfg.pagination_selector:
                 nxt = soup.select_one(cfg.pagination_selector)
                 if nxt and nxt.get("href"):
                     nxt_url = urljoin(current, nxt.get("href"))
-
+    
             pages += 1
-            self.logger.info(f"Page {pages}: {found} listings | next={bool(nxt_url)}")
+            self.logger.info(f"Page {pages}: {new_count} listings | next={bool(nxt_url)}")
             current = nxt_url
             time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
-
+    
+            if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
+                break
+    
+        # Persist seen set (so future runs don’t re-emit same URLs)
+        try:
+            with open(seen_file, "w", encoding="utf-8") as f:
+                for u in sorted(self.seen_urls):
+                    f.write(u + "\n")
+        except Exception as e:
+            self.logger.warning(f"Could not write seen file: {seen_file} ({e})")
+    
         self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} urls")
         return all_urls
 
@@ -444,4 +479,5 @@ class PropertyScraper:
 
    
         
+
 
