@@ -36,34 +36,52 @@ jobs:
         run: |
           python -m pip install -U pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # Ensure Playwright + Chromium are installed for headless scraping
-          python -c "import importlib, sys; sys.exit(0 if importlib.util.find_spec('playwright') else 1)" \
-            && python -m playwright install --with-deps chromium || true
 
       - name: Install Playwright browsers
         run: |
-            python -m playwright install --with-deps chromium    
+          python -m playwright install --with-deps chromium
 
       - name: Discovery (lamudi_cebu)
+        env:
+          SCRAPING_MODE: playwright
+          MAX_LISTINGS: "30"       # cap for CI smoke
+          RATE_LIMIT_DELAY: "0.8"
+          LOG_LEVEL: DEBUG
         run: |
           python -m src.runner.run_discovery --portal lamudi_cebu
 
-      - name: Capture run dir
-        id: disco
+      - id: capture
+        name: Capture run dir
         shell: bash
         run: |
-          set -e
-          latest=$(ls -1d scraper_output/run_* | tail -n1)
-          echo "RUN_DIR=$latest" >> "$GITHUB_OUTPUT"
-          echo "Captured RUN_DIR: $latest"
+          dir=$(ls -1d scraper_output/run_* | tail -n1)
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
 
-      - name: Details (lamudi_cebu)
+      - name: Show discovered URLs
         run: |
-          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.disco.outputs.RUN_DIR }}"
+          ls -lah "${{ steps.capture.outputs.dir }}/staged" || true
+          head -n 10 "${{ steps.capture.outputs.dir }}/staged/lamudi_cebu_urls.jsonl"
+
+      - name: Details (requests mode to avoid headless flakiness)
+        env:
+          SCRAPING_MODE: requests
+          RATE_LIMIT_DELAY: "0.6"
+          LOG_LEVEL: DEBUG
+        run: |
+          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.capture.outputs.dir }}"
+
+      - name: Show listings output
+        run: |
+          ls -lah "${{ steps.capture.outputs.dir }}/staged" || true
+          wc -l "${{ steps.capture.outputs.dir }}/staged/lamudi_cebu_listings.jsonl" || true
+          head -n 5 "${{ steps.capture.outputs.dir }}/staged/lamudi_cebu_listings.jsonl" || true
 
       - name: Publish to Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.disco.outputs.RUN_DIR }}"
+          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.capture.outputs.dir }}"
 
       # Optional: quick sanity log (doesn't fail the job if it can't query)
       - name: Sanity echo staged head
