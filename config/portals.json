@@ -3,7 +3,7 @@
     {
       "portal_name": "lamudi_cebu",
       "seed_urls": [
-        "https://www.lamudi.com.ph/rent/cebu/cebu-1/commercial/?page=1"
+        "https://www.lamudi.com.ph/rent/cebu/cebu-1/commercial/"
       ],
       "scraping_mode": "playwright",
       "listing_selector": "a.ListingCell-moreInfo, .ListingCell a[href*='/property/'], a[href*='/property/']",
@@ -29,4 +29,5 @@
       }
     }
   ]
+
 }
