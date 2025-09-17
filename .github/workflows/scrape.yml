@@ -1,30 +1,48 @@
 name: Nightly Lamudi Cebu Scrape
 
 on:
-  workflow_dispatch:
   schedule:
-    # 3:00 AM Asia/Manila = 19:00 UTC the previous day
+    # GitHub cron runs in UTC. 3:00 AM Manila (UTC+8) == 19:00 UTC previous day
     - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      max_listings:
+        description: "Hard cap listings (0 = all on pages visited)"
+        required: false
+        default: "30"
+      max_pages:
+        description: "Pagination cap"
+        required: false
+        default: "1"
+      rate_limit_delay:
+        description: "Seconds between requests"
+        required: false
+        default: "1.2"
+      scraping_mode:
+        description: "requests | playwright"
+        required: false
+        default: "playwright"
+
+env:
+  TZ: Asia/Manila
+  PYTHONUNBUFFERED: "1"
+  # Fallbacks; workflow_dispatch can override these
+  SCRAPING_MODE: ${{ github.event.inputs.scraping_mode || 'playwright' }}
+  RATE_LIMIT_DELAY: ${{ github.event.inputs.rate_limit_delay || '1.2' }}
+  MAX_PAGES: ${{ github.event.inputs.max_pages || '1' }}
+  MAX_LISTINGS: ${{ github.event.inputs.max_listings || '30' }}
+
+  # Required by your app
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-
-    env:
-      # Scraper knobs for CI
-      SCRAPING_MODE: playwright
-      RATE_LIMIT_DELAY: "1.0"
-      MAX_PAGES: "1"
-      MAX_LISTINGS: "0"        # set "0" to remove the hard cap
-      LOG_LEVEL: INFO
-      PORTALS_CONFIG: ./config/portals.json
-
-      # DB (pulled from repo/environment secrets)
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    timeout-minutes: 30
 
     steps:
-      - name: Check out repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -32,59 +50,76 @@ jobs:
         with:
           python-version: "3.10"
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
-          python -m pip install -U pip
+          python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Install Playwright browsers
+      # Only needed if SCRAPING_MODE=playwright
+      - name: Install Playwright (chromium)
+        if: env.SCRAPING_MODE == 'playwright'
         run: |
+          python -m pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Discovery (lamudi_cebu)
-        env:
-          SCRAPING_MODE: playwright
-          MAX_LISTINGS: "30"       # cap for CI smoke
-          RATE_LIMIT_DELAY: "0.8"
-          LOG_LEVEL: DEBUG
+      - name: Echo effective env
+        run: |
+          echo "SCRAPING_MODE=${SCRAPING_MODE}"
+          echo "RATE_LIMIT_DELAY=${RATE_LIMIT_DELAY}"
+          echo "MAX_PAGES=${MAX_PAGES}"
+          echo "MAX_LISTINGS=${MAX_LISTINGS}"
+
+      - name: Run discovery
         run: |
           python -m src.runner.run_discovery --portal lamudi_cebu
 
-      - id: capture
-        name: Capture run dir
+      - name: Capture run dir
+        id: rundir
         shell: bash
         run: |
           dir=$(ls -1d scraper_output/run_* | tail -n1)
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Run dir: $dir"
 
-      - name: Show discovered URLs
+      - name: Ensure URLs file exists
         run: |
-          ls -lah "${{ steps.capture.outputs.dir }}/staged" || true
-          head -n 10 "${{ steps.capture.outputs.dir }}/staged/lamudi_cebu_urls.jsonl"
+          test -f "${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_urls.jsonl" || (echo "No URLs staged" && exit 1)
 
-      - name: Details (requests mode to avoid headless flakiness)
-        env:
-          SCRAPING_MODE: requests
-          RATE_LIMIT_DELAY: "0.6"
-          LOG_LEVEL: DEBUG
+      - name: Run details
         run: |
-          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.capture.outputs.dir }}"
+          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
 
-      - name: Show listings output
+      - name: Sanity peek (first 3 rows)
         run: |
-          ls -lah "${{ steps.capture.outputs.dir }}/staged" || true
-          wc -l "${{ steps.capture.outputs.dir }}/staged/lamudi_cebu_listings.jsonl" || true
-          head -n 5 "${{ steps.capture.outputs.dir }}/staged/lamudi_cebu_listings.jsonl" || true
+          f="${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_listings.jsonl"
+          test -f "$f" || (echo "No listings.jsonl created" && exit 1)
+          head -n 3 "$f" || true
+
+      - name: Guard: non-empty results
+        run: |
+          f="${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_listings.jsonl"
+          n=$(wc -l < "$f" || echo 0)
+          echo "Rows: $n"
+          if [ "$n" -lt 1 ]; then
+            echo "No rows parsed; failing the job to surface the issue."
+            exit 1
+          fi
 
       - name: Publish to Supabase
         env:
+          # pass through again to be explicit
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
-          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.capture.outputs.dir }}"
+          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
 
-      # Optional: quick sanity log (doesn't fail the job if it can't query)
-      - name: Sanity echo staged head
-        continue-on-error: true
-        run: |
-          head -n 5 "${{ steps.disco.outputs.RUN_DIR }}/staged/lamudi_cebu_listings.jsonl" || true
+      - name: Done
+        run: echo "✅ Nightly scrape completed."
