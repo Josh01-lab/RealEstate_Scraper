@@ -11,6 +11,8 @@ import requests, jsonlines
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
 from src.config import ENV_SCRAPE_MODE, ENV_RATE_DELAY, MAX_LISTINGS, MAX_PAGES
+from src.utils.jsonld import _jsonld_iter, extract_jsonld_blocks, find_first
+
 
 
 
@@ -87,6 +89,9 @@ class ListingData:
     bathrooms: Optional[int] = None
     description: Optional[str] = None
     scraped_at: Optional[str] = None
+    property_type: Optional[str] = None
+    published_at: Optional[str] = None
+    published_at_text: Optional[str] = None
     
 
 
@@ -125,7 +130,7 @@ class PropertyScraper:
 
         # --------------- env helpers (fallbacks if module missing) ---------------
         try:
-            from src.utils.config import (
+            from src.config import (
                 get_env_scrape_mode,
                 get_env_rate_limit_delay,
                 get_env_max_listings,
@@ -201,6 +206,7 @@ class PropertyScraper:
     def _canonicalize_url(self, url: str) -> str:
         pu = urlparse(url)
         return f"{pu.scheme}://{pu.netloc}{pu.path}".rstrip("/")
+    
 
     def _fetch_with_requests(self, url: str, cfg: ScrapingConfig) -> Optional[str]:
         try:
@@ -217,93 +223,112 @@ class PropertyScraper:
             return None
         
     def url_discovery_routine(self, cfg: "ScrapingConfig") -> List[str]:
-        """Discover listing URLs for a portal, save to staged/<portal>_urls.jsonl (append)."""
-        import os
-    
+        """
+        Paginate through ALL result pages, collect all listing URLs on each page,
+        de-duplicate, and write to staged/<portal>_urls.jsonl.
+        - Respects cfg.max_pages (0 or None means 'no cap', stop only when no next).
+        - Uses cfg.listing_selector for per-listing anchors.
+        - Uses cfg.pagination_selector to find the "next page" link (e.g., a[rel='next']).
+        """
+        import random, time, jsonlines
+        from urllib.parse import urljoin
+
+
         self.logger.info(f"Discovery start {cfg.portal_name}")
+
+
         urls_out = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
-        seen_file = self.dirs["staged"] / f"{cfg.portal_name}_seen.txt"
-    
-        # Hard cap by count (0 = unlimited)
-        MAX_LISTINGS = int(os.getenv("MAX_LISTINGS", "0"))
-    
-        # Load prior seen for cross-run dedupe (optional but handy)
-        if seen_file.exists():
+        # (re)create the file so re-runs don’t append duplicates from previous runs
+        if urls_out.exists():
+            urls_out.unlink()
+
+
+        # hard caps via env (optional)
+        try:
+            from src.config import get_env_max_listings
+            MAX_LISTINGS = get_env_max_listings(0)
+        except Exception:
+            import os
             try:
-                self.seen_urls |= {line.strip() for line in seen_file.read_text(encoding="utf-8").splitlines() if line.strip()}
-            except Exception as e:
-                self.logger.warning(f"Could not read seen file: {seen_file} ({e})")
-    
+                MAX_LISTINGS = int(os.getenv("MAX_LISTINGS", "0"))
+            except Exception:
+                MAX_LISTINGS = 0
+
+
+        # “0” or None for unlimited pages until no next
+        max_pages = cfg.max_pages if cfg.max_pages is not None else 0
+        if isinstance(max_pages, bool):
+            max_pages = 0
+
+
         all_urls: List[str] = []
         pages = 0
         current = cfg.seed_urls[0]
-    
-        # Optional: only accept links from the same hostname as the seed
-        seed_host = urlparse(cfg.seed_urls[0]).netloc
-    
-        while current and pages < cfg.max_pages:
-            html = self._get_page_content(current, cfg)
-            if not html:
-                self.logger.warning(f"No HTML for {current}; stopping pagination.")
-                break
-    
-            soup = BeautifulSoup(html, "lxml")
-    
-            # Collect listing URLs on this page
-            page_urls = set()
-            for a in soup.select(cfg.listing_selector):
-                href = (a.get("href") or "").strip()
-                if not href or href.startswith(("javascript:", "mailto:")):
-                    continue
-                full = self._canonicalize_url(urljoin(current, href))
-                if not full.startswith(("http://", "https://")):
-                    continue
-                # same-domain guard
-                if urlparse(full).netloc != seed_host:
-                    continue
-                page_urls.add(full)
-    
-            # Write new ones
-            new_count = 0
-            for full in sorted(page_urls):
-                if full in self.seen_urls:
-                    continue
-                if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
-                    self.logger.info(f"Hit MAX_LISTINGS={MAX_LISTINGS}; stopping discovery.")
-                    current = None  # stop outer loop
+        seen_local = set()
+
+
+        with jsonlines.open(urls_out, "w") as w:
+            while current and (max_pages == 0 or pages < max_pages):
+                html = self._get_page_content(current, cfg)
+                if not html:
+                    self.logger.warning(f"No HTML for {current}; stopping pagination.")
                     break
-                with jsonlines.open(urls_out, "a") as w:
-                    w.write({"url": full, "discovered_at": datetime.now(timezone.utc).isoformat()})
-                self.seen_urls.add(full)
-                all_urls.append(full)
-                new_count += 1
-    
-            # Find "next" page
-            nxt_url = None
-            if current and cfg.pagination_selector:
-                nxt = soup.select_one(cfg.pagination_selector)
-                if nxt and nxt.get("href"):
-                    nxt_url = urljoin(current, nxt.get("href"))
-    
-            pages += 1
-            self.logger.info(f"Page {pages}: {new_count} listings | next={bool(nxt_url)}")
-            current = nxt_url
-            time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.8))
-    
-            if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
-                break
-    
-        # Persist seen set (so future runs don’t re-emit same URLs)
-        try:
-            with open(seen_file, "w", encoding="utf-8") as f:
-                for u in sorted(self.seen_urls):
-                    f.write(u + "\n")
-        except Exception as e:
-            self.logger.warning(f"Could not write seen file: {seen_file} ({e})")
-    
+
+
+                soup = BeautifulSoup(html, "lxml")
+
+
+                # --- collect listing URLs on this page
+                found_this_page = 0
+                for a in soup.select(cfg.listing_selector):
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    full = self._canonicalize_url(urljoin(current, href))
+                    if full in seen_local:
+                        continue
+                    seen_local.add(full)
+                    all_urls.append(full)
+                    w.write({
+                        "url": full,
+                        "discovered_at": datetime.now(timezone.utc).isoformat()
+                    })
+                    found_this_page += 1
+
+
+                    # optional global hard cap by count (mostly for tests)
+                    if MAX_LISTINGS and len(all_urls) >= MAX_LISTINGS:
+                        self.logger.info(f"Hit MAX_LISTINGS={MAX_LISTINGS}; stopping.")
+                        current = None
+                        break
+
+
+                # --- next page (via pagination link)
+                next_url = None
+                if cfg.pagination_selector:
+                    nxt = soup.select_one(cfg.pagination_selector)
+                    if nxt and nxt.get("href"):
+                        next_url = urljoin(current, nxt.get("href"))
+
+
+                pages += 1
+                self.logger.info(
+                    f"Page {pages}: {found_this_page} listings | total={len(all_urls)} | next={bool(next_url)}"
+                )
+
+
+                # stop if no more pages
+                if not next_url:
+                    break
+
+
+                # rate limit
+                time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.5))
+                current = next_url
+
+
         self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} urls")
         return all_urls
-
 
     def _ensure_playwright(self, cfg: "ScrapingConfig"):
         if not PLAYWRIGHT_AVAILABLE:
@@ -323,7 +348,7 @@ class PropertyScraper:
         page = ctx.new_page()
         page.set_default_navigation_timeout(cfg.timeout * 1000)
         try:
-            page.goto(url, wait_until="domcontentloaded")
+            page.goto(url, wait_until="networkidle", timeout=60000)
             # try to accept cookies
             try:
                 page.locator(
@@ -413,145 +438,308 @@ class PropertyScraper:
             return dt.astimezone(timezone.utc).isoformat()
         except Exception:
             return None
+        
+    def _parse_relative_published(self, text: str) -> Optional[str]:
+        """Turn '2 months ago' etc. into ISO8601 (UTC)."""
+        if not text:
+            return None
+        m = REL_RE.search(text)
+        if not m:
+            return None
+        parts = {k: int(v) for k, v in m.groupdict().items() if v}
+        if not parts:
+            return None
+
+        # crude month/year to days approximation
+        days = (
+            parts.get("days", 0)
+            + parts.get("weeks", 0) * 7
+            + parts.get("months", 0) * 30
+            + parts.get("years", 0) * 365
+        )
+        td = timedelta(
+            days=days,
+            hours=parts.get("hours", 0),
+            minutes=parts.get("minutes", 0),
+        )
+        published = datetime.now(timezone.utc) - td
+        return published.isoformat()
+
+    def _probe_selectors(self, soup, selectors: dict) -> dict:
+        """Debug which selectors matched (for logging)."""
+        hits = {}
+        for name, sel in selectors.items():
+            try:
+                hits[name] = bool(soup.select_one(sel))
+            except Exception:
+                hits[name] = False
+        return hits    
+        
 
     # --- Listing detail parse -------------------------------------
-    def _parse_listing(self, html: str, url: str, cfg: ScrapingConfig) -> Dict[str, any]:
-        soup = BeautifulSoup(html, "lxml")
-        sel = cfg.detail_selectors or {}
-    
-        def tx(css: str) -> Optional[str]:
-            if not css:
-                return None
-            el = soup.select_one(css)
-            if not el:
-                return None
-            # prefer datetime attribute for <time> when present
-            if el.name == "time" and el.get("datetime"):
-                return el.get("datetime")
-            return (el.get_text(" ", strip=True) or None)
-    
-        title = tx(sel.get("title"))
-        address = tx(sel.get("address"))
-        property_type = tx(sel.get("property_type"))
-        description = tx(sel.get("description"))
-    
-        # price parsing (keep your current logic if you already have it)
-        price_raw = tx(sel.get("price"))
-        price_dict = None
-        if price_raw:
-            # super simple normalization; keep your richer version if you have one
-            m = re.search(r"([\d,]+(?:\.\d+)?)", price_raw)
-            val = float(m.group(1).replace(",", "")) if m else None
-            cur = "PHP" if "₱" in price_raw or "PHP" in price_raw.upper() else None
-            period = "month" if "month" in price_raw.lower() else None
-            price_dict = {"raw": price_raw, "currency": cur, "value": val, "period": period}
-    
-        # area parsing
-        area_raw = tx(sel.get("area"))
-        area_dict = None
-        if area_raw:
-            m2 = re.search(r"([\d,]+(?:\.\d+)?)\s*sq?m", area_raw, re.I)
-            sqm = float(m2.group(1).replace(",", "")) if m2 else None
-            area_dict = {"raw": area_raw, "sqm": sqm}
-    
-        # --- published_at parsing ---
-        published_at_iso: Optional[str] = None
-    
-        # 1) first: try a proper <time datetime="...">
-        t_el = soup.select_one("time[itemprop='datePublished'], time[datetime]")
-        if t_el and t_el.get("datetime"):
+    def _parse_listing(self, html: str, url: str, cfg) -> Optional[dict]:
+        """Parse a Lamudi listing page into a dict. Best-effort + JSON-LD fallback."""
+        soup = BeautifulSoup(html or "", "lxml")
+
+        # --- tiny local helpers (avoid external deps)
+        def _norm_txt(x):
+            return (x or "").replace("\u00a0", " ").strip()
+
+        def _first_text(soup, selectors):
+            for sel in selectors:
+                el = soup.select_one(sel)
+                if not el:
+                    continue
+                v = el.get("content") if el.name == "meta" else el.get_text(" ", strip=True)
+                v = _norm_txt(v)
+                if v:
+                    return v
+            return None
+
+        def _first_attr_or_text(soup, selectors, attr="datetime"):
+            for sel in selectors:
+                el = soup.select_one(sel)
+                if not el:
+                    continue
+                v = el.get(attr) or el.get_text(" ", strip=True)
+                v = _norm_txt(v)
+                if v:
+                    return v
+            return None
+
+        def _parse_rel_to_iso(text):
+            # Works if REL_RE is defined at module level (you have it already)
             try:
-                dt = dtparse.parse(t_el["datetime"])
-                if not dt.tzinfo:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                published_at_iso = self._dt_to_iso(dt)
-            except Exception:
-                published_at_iso = None
-    
-        # 2) otherwise: try your configured text container and parse relative phrase
-        if not published_at_iso:
-            rel_text = tx(sel.get("published_at_text"))
-            # If it looks like a full date, parse directly; else try relative
-            if rel_text:
-                parsed = None
+                m = REL_RE.search(text)
+            except NameError:
+                m = None
+            if not m:
+                return None
+            parts = {k: int(v) for k, v in m.groupdict().items() if v}
+            if not parts:
+                return None
+            days = (
+                parts.get("days", 0)
+                + parts.get("weeks", 0) * 7
+                + parts.get("months", 0) * 30
+                + parts.get("years", 0) * 365
+            )
+            from datetime import timedelta
+            ts = datetime.now(timezone.utc) - timedelta(
+                days=days,
+                hours=parts.get("hours", 0),
+                minutes=parts.get("minutes", 0),
+            )
+            return ts.isoformat()
+
+        def _jsonld_blocks(soup):
+            blocks = []
+            for s in soup.select("script[type='application/ld+json']"):
+                raw = (s.get_text() or "").strip()
+                if not raw:
+                    continue
                 try:
-                    # Attempt absolute date first (e.g., "12 Sep 2023")
-                    parsed_dt = dtparse.parse(rel_text, fuzzy=True, dayfirst=False)
-                    if parsed_dt:
-                        if not parsed_dt.tzinfo:
-                            parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
-                        parsed = self._dt_to_iso(parsed_dt)
+                    blocks.append(json.loads(raw))
                 except Exception:
-                    parsed = None
-                if not parsed:
-                    parsed = self._parse_relative_published(rel_text)
-                published_at_iso = parsed
-    
+                    # salvage common multi-object blobs
+                    try:
+                        parts = raw.replace("}\n{", "}\n\n{").split("\n\n")
+                        for p in parts:
+                            blocks.append(json.loads(p))
+                    except Exception:
+                        pass
+            return blocks
+
+        def _iter_nodes(obj):
+            if isinstance(obj, dict):
+                yield obj
+                for v in obj.values():
+                    yield from _iter_nodes(v)
+            elif isinstance(obj, list):
+                for it in obj:
+                    yield from _iter_nodes(it)
+
+        def _find_first(nodes, *types):
+            for root in nodes:
+                for node in _iter_nodes(root):
+                    t = node.get("@type")
+                    if not t:
+                        continue
+                    if isinstance(t, list):
+                        if any(tt in t for tt in types):
+                            return node
+                    elif t in types:
+                        return node
+            return None
+
+        # --- title
+        title = _first_text(soup, [
+            "h1[data-testid='ad-title']",
+            "h1.ListingDetail__Title, h1.listing-title, h1",
+            "meta[property='og:title']",
+        ])
+
+        # --- price (DOM)
+        price_text = _first_text(soup, [
+            "[data-testid='ad-price']",
+            ".ListingDetail__Price, .price, .Price__Value",
+            "meta[property='product:price:amount']",
+        ])
+        price = None
+        if price_text:
+            txt = _norm_txt(price_text).replace(",", "")
+            m = re.search(r"(\d+(?:\.\d+)?)", txt)
+            val = float(m.group(1)) if m else None
+            per = "month" if "month" in txt.lower() else None
+            cur = "PHP" if ("₱" in price_text or "php" in price_text.lower()) else None
+            price = {"raw": price_text, "currency": cur, "value": val, "period": per}
+
+        # --- area
+        area = None
+        full_text = soup.get_text(" ", strip=True)
+        m = re.search(r"(\d[\d,\.]*)\s*(sqm|m2|m²)", full_text, flags=re.I)
+        if m:
+            try:
+                area = {"raw": m.group(0), "sqm": float(m.group(1).replace(",", ""))}
+            except Exception:
+                area = None
+
+        # --- address
+        address = _first_text(soup, [
+            "[data-testid='address'], .ListingDetail__Address, .address",
+            "span[itemprop='address'], meta[property='og:street-address']",
+            ".Breadcrumbs, nav[aria-label='breadcrumb']",
+        ])
+
+        # --- description
+        description = _first_text(soup, [
+            "[data-testid='description'], .ListingDetail__Description, .description",
+            "section[data-testid='description']",
+        ])
+
+        # --- published_at (DOM first)
+        published_text = _first_attr_or_text(soup, [
+            "[data-testid='publish-date']",
+            "time[datetime]",
+            ".ListingDetail__Meta time",
+            ".posted-date time, .posted_date time",
+            ".meta time"
+        ], attr="datetime")
+        if not published_text:
+            published_text = _first_text(soup, [
+                "[data-testid='publish-date']",
+                ".ListingDetail__Meta, .posted-date, .posted_date, .meta"
+            ])
+
+        published_at = None
+        if published_text:
+            if re.search(r"\d{4}-\d{2}-\d{2}", published_text):
+                try:
+                    published_at = dtparse.parse(published_text).astimezone(timezone.utc).isoformat()
+                except Exception:
+                    published_at = None
+            else:
+                published_at = _parse_rel_to_iso(published_text)
+
+        # --- JSON-LD fallback (fills missing published_*)
+        if not published_text:
+            blocks = _jsonld_blocks(soup)
+            node = _find_first(blocks, "Offer", "Product", "NewsArticle", "Article", "CreativeWork") or {}
+            for key in ("datePublished", "datePosted", "dateCreated", "uploadDate", "pubDate"):
+                v = node.get(key)
+                if v:
+                    try:
+                        published_at = dtparse.parse(v).astimezone(timezone.utc).isoformat()
+                        published_text = v
+                        break
+                    except Exception:
+                        pass
+
+        # --- property type (best effort)
+        property_type = None
+        try:
+            blocks = blocks if 'blocks' in locals() else _jsonld_blocks(soup)
+            product = _find_first(blocks, "Product", "Offer", "RealEstateAgent") or {}
+            property_type = product.get("category") or product.get("@type")
+        except Exception:
+            pass
+        if not property_type:
+            if re.search(r"\boffice|serviced office|commercial\b", full_text, re.I):
+                property_type = "Offices"
+
         return {
             "url": url,
             "title": title,
             "address": address,
             "property_type": property_type,
             "description": description,
-            "price": price_dict,
-            "area": area_dict,
-            "published_at": published_at_iso,
+            "price": price,
+            "area": area,
+            "published_at_text": published_text,
+            "published_at": published_at, # ISO8601 or None
             "scraped_at": datetime.now(timezone.utc).isoformat(),
         }
 
 
-    # --- Details runner --------------------------------------------
-    def detail_extraction_stage(self, listing_urls: List[str], cfg: "ScrapingConfig") -> int:
-        self.logger.info(f"Starting detail extraction for {cfg.portal_name} with {len(listing_urls)} URLs")
-        if not listing_urls:
-            self.logger.warning("No URLs to process; did discovery run?")
-            return 0
 
-        processed_file = self.dirs["staged"] / f"{cfg.portal_name}_processed.txt"
-        processed = set()
-        if processed_file.exists():
-            processed |= {line.strip() for line in open(processed_file, encoding="utf-8")}
+    # --- Details runner --------------------------------------------
+    def detail_extraction_stage(self, urls: Optional[List[str]], cfg: "ScrapingConfig") -> int:
+        """
+        Read each URL, parse a listing, and write a JSONL of dict rows.
+        _parse_listing() must return either a dict or None.
+        """
+        # If urls wasn't passed, read from the staged urls file.
+        if urls is None:
+            urls_file = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
+            if not urls_file.exists():
+                raise FileNotFoundError(f"Not found: {urls_file}")
+            urls = []
+            with jsonlines.open(urls_file, "r") as r:
+                for row in r:
+                    if row and row.get("url"):
+                        urls.append(row["url"])
 
         out_file = self.dirs["staged"] / f"{cfg.portal_name}_listings.jsonl"
-        failed_file = self.dirs["staged"] / f"{cfg.portal_name}_failed.txt"
 
-        success = fail = 0
-        with jsonlines.open(out_file, "a") as writer, open(processed_file, "a", encoding="utf-8") as done:
-            for idx, u in enumerate(listing_urls, 1):
-                if u in processed:
-                    continue
-                self.logger.info(f"[{idx}/{len(listing_urls)}] detail -> {u}")
+        ok = fail = 0
+        with jsonlines.open(out_file, "w") as w:
+            self.logger.info("Starting detail extraction for %s with %d URLs", cfg.portal_name, len(urls))
+            for i, u in enumerate(urls, 1):
+                self.logger.info("[%d/%d] detail -> %s", i, len(urls), u)
 
-                html = None
-                for attempt in range(1, cfg.max_retries + 1):
-                    html = self._get_page_content(u, cfg)
-                    if html:
-                        break
-                    time.sleep(min(2 ** attempt, 8))
-
+                html = self._get_page_content(u, cfg)
                 if not html:
                     fail += 1
-                    with open(failed_file, "a", encoding="utf-8") as ff:
-                        ff.write(u + "\n")
                     continue
 
                 try:
                     listing = self._parse_listing(html, u, cfg)
-                    if not is_dataclass(listing):
-                        raise ValueError("parse returned non-dataclass")
-                    writer.write(asdict(listing))
-                    done.write(u + "\n")
-                    success += 1
+
+                    if not listing:
+                        fail += 1
+                        continue
+
+                    # If someone returns a dataclass by mistake, convert once.
+                    from dataclasses import is_dataclass, asdict as dc_asdict
+                    if is_dataclass(listing):
+                        listing = dc_asdict(listing)
+
+                    if not isinstance(listing, dict):
+                        self.logger.warning("Parse returned non-dict type: %r", type(listing))
+                        fail += 1
+                        continue
+
+                    w.write(listing)
+                    ok += 1
+
                 except Exception as e:
-                    self.logger.warning(f"Parse error for {u}: {e}")
+                    self.logger.exception("Parse error %s: %s", u, e)
                     fail += 1
-                    with open(failed_file, "a", encoding="utf-8") as ff:
-                        ff.write(u + "\n")
 
-                time.sleep(cfg.rate_limit_delay + random.uniform(0, 0.7))
+                time.sleep(cfg.rate_limit_delay)
 
-        self.logger.info(f"Details done {cfg.portal_name}: {success} rows (fail {fail})")
-        return success
+        self.logger.info("Details done %s: %d rows (fail %d)", cfg.portal_name, ok, fail)
+        return ok
 
     # --- Cleanup ---------------------------------------------------
     def __del__(self):
@@ -582,27 +770,38 @@ class PropertyScraper:
     def _dt_to_iso(self, dt: datetime) -> str:
         return dt.astimezone(timezone.utc).isoformat()
     
-    def _parse_relative_published(self, text: str) -> Optional[str]:
-        if not text:
-            return None
-        m = _REL_RE.search(text)
-        if not m:
-            return None
-        parts = {k: int(v) for k, v in m.groupdict().items() if v}
-        if not parts:
-            return None
-        # build a timedelta (years/months are approximated)
-        days = parts.get("days", 0) + parts.get("weeks", 0) * 7 + parts.get("months", 0) * 30 + parts.get("years", 0) * 365
-        td = timedelta(
-            days=days,
-            hours=parts.get("hours", 0),
-            minutes=parts.get("minutes", 0),
-        )
-        published = datetime.now(timezone.utc) - td
-        return self._dt_to_iso(published)
+    def extract_jsonld_blocks(scripts: list) -> list:
+        """Parse a list of JSON strings (script tags) into a flat list of dict nodes."""
+        nodes = []
+        for s in scripts:
+            if not s:
+                continue
+            try:
+                data = json.loads(s)
+                if isinstance(data, dict):
+                    nodes.append(data)
+                elif isinstance(data, list):
+                    nodes.extend([d for d in data if isinstance(d, dict)])
+            except Exception:
+                # ignore malformed JSON-LD
+                continue
+        return nodes
 
-   
-        
+    def find_first(nodes: list, type_name: str) -> Optional[dict]:
+        """Return first JSON-LD node with matching @type."""
+        for node in nodes:
+            t = node.get("@type")
+            if t == type_name:
+                return node
+            # sometimes @type is a list
+            if isinstance(t, list) and type_name in t:
+                return node
+        return None
+
+    
+    
+    
+    
 
 
 

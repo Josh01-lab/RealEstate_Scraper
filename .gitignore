@@ -1,5 +1,19 @@
-﻿scraper_output/
-*.log
-*.sqlite
-.env
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# venv
 .venv/
+venv/
+
+# local runs
+scraper_output/
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/

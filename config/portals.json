@@ -2,27 +2,13 @@
   "portals": [
     {
       "portal_name": "lamudi_cebu",
-      "seed_urls": [
-        "https://www.lamudi.com.ph/rent/cebu/cebu-1/commercial/"
-      ],
+      "seed_urls": ["https://www.lamudi.com.ph/rent/cebu/cebu-1/commercial/"],
       "scraping_mode": "playwright",
-      "listing_selector": "a.ListingCell-moreInfo, .ListingCell a[href*='/property/'], a[href*='/property/']",
-      "pagination_selector": "a[rel='next'], a[aria-label='Next'], .pagination-next a",
-      "detail_selectors": {
-        "_detail_wait_for_selector": ".main-title, h1, .prices-and-fees__price, [data-test='floor-area-value']",
-        "title": ".main-title, .left-details .main-title h1, h1",
-        "address": "#view-map__text.view-map__text, .left-details .view-map__text, [data-qa='address']",
-        "price": ".prices-and-fees__price .Price__Value, .prices-and-fees__price, [data-qa='price'], .price-value",
-        "area": ".details-item-value[data-test='area-value'], [data-test='floor-area-value'], .place-features__values[data-test*='area'], .place-details .details-item-value, .KeyFacts .floor-area",
-        "property_type": "[data-test='property-type-value']",
-        "description": ".description, .left-details .description, [data-qa='description']",
-        "published_at_text": ".left-details .date, .listing__meta .date, [data-qa='published_at']"
-      },
-      "rate_limit_delay": 1.4,
-      "max_retries": 5,
-      "timeout": 60,
-      "max_pages": 120,
-      "wait_for_selector": "a[href*='/property/'], .ListingCell, main",
+      "listing_selector": "a[href*='/property/']",
+      "pagination_selector": "a[rel='next'], nav[aria-label='Pagination'] a[aria-label='Next']",
+      "rate_limit_delay": 1.0,
+      "max_pages": 0,     
+      "wait_for_selector": "a[href*='/property/']",
       "respect_robots": false,
       "headers": {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"

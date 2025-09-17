@@ -14,12 +14,18 @@ def _prune_nulls(d: Dict[str, Any]) -> Dict[str, Any]:
         if k in ("url", "scraped_at"):
             keep[k] = v
             continue
+        if k in ("description", "published_at_text"):
+            # keep only if non-empty string
+            if isinstance(v, str) and v.strip():
+                keep[k] = v
+            continue
         if v is None:
             continue
         if isinstance(v, str) and not v.strip():
             continue
         keep[k] = v
     return keep
+
 
 
 # --- writer --------------------------------------------------------
@@ -68,25 +74,35 @@ class SupabaseWriter:
         if not self.buffer:
             return
 
-        # Take the batch and clear buffer optimistically
         payload = self.buffer
         self.buffer = []
 
-        # Chunk very large batches to be safe on payload size
         CHUNK = 250
         for i in range(0, len(payload), CHUNK):
             chunk = payload[i:i + CHUNK]
-
             for attempt in range(1, self.retries + 1):
                 try:
-                    # NULL-safe upsert via RPC (uses upsert_listings_batch)
+                    # primary path: NULL-safe RPC
                     self.client.rpc('upsert_listings_batch', {'rows': chunk}).execute()
+                    # optional: lightweight progress log
+                    # print(f"[supabase_writer] RPC upsert ok: {len(chunk)} rows")
                     break
                 except Exception as e:
+                    # If the RPC doesn’t exist or fails, try a direct upsert as a fallback
+                    if "upsert_listings_batch" in str(e):
+                        try:
+                            self.client.table("listings").upsert(
+                                chunk, on_conflict="url", returning="minimal"
+                            ).execute()
+                            # print(f"[supabase_writer] Fallback upsert ok: {len(chunk)} rows")
+                            break
+                        except Exception as e2:
+                            if attempt == self.retries:
+                                raise
                     if attempt == self.retries:
-                        # If it still fails on the last attempt, re-raise
                         raise
-                    time.sleep(2 ** attempt)  # simple exponential backoff
+                    time.sleep(2 ** attempt)
+
 
     def close(self) -> None:
         self.flush()

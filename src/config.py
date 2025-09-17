@@ -42,27 +42,27 @@ def validate_prod() -> None:
         if missing:
             raise RuntimeError(f"Missing required env vars in prod: {missing}")
             
-def get_env_scrape_mode(default=None):
+def get_env_scrape_mode(default="requests"):
     """Return 'requests' | 'playwright' | 'selenium' if set; else default."""
     v = os.getenv("SCRAPING_MODE")
-    return v.lower() if v else default
+    return (v or default).lower()
 
-def get_env_rate_limit_delay(default=None):
+def get_env_rate_limit_delay(default=1.0):
     """Return float if RATE_LIMIT_DELAY is set; else default (often None)."""
     v = os.getenv("RATE_LIMIT_DELAY")
     if v is None:
-        return default
+        return float(default)
     try:
         return float(v)
-    except ValueError:
-        return default
+    except (TypeError, ValueError):
+        return float(default)
 
 def get_env_max_listings(default=0):
     """Return int if MAX_LISTINGS is set; else default."""
     v = os.getenv("MAX_LISTINGS")
     if v is None:
-        return default
+        return int(default)
     try:
         return int(v)
-    except ValueError:
-        return default
+    except (TypeError, ValueError):
+        return int(default)
