@@ -1,7 +1,28 @@
 name: Nightly Lamudi Cebu Scrape
 
 on:
+  schedule:
+    # GitHub cron runs in UTC. 3:00 AM Manila (UTC+8) == 19:00 UTC previous day
+    - cron: "0 19 * * *"
   workflow_dispatch:
+    inputs:
+      max_listings:
+        description: "Hard cap listings (0 = all on pages visited)"
+        required: false
+        default: "30"
+      max_pages:
+        description: "Pagination cap"
+        required: false
+        default: "1"
+      rate_limit_delay:
+        description: "Seconds between requests"
+        required: false
+        default: "1.2"
+      scraping_mode:
+        description: "requests | playwright"
+        required: false
+        default: "playwright"
+
 
 jobs:
   scrape:
