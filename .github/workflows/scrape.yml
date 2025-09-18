@@ -1,11 +1,11 @@
-name: Minimal Dispatch Tester
+name: Nightly Lamudi Cebu Scrape
 
 on:
   workflow_dispatch:
 
 jobs:
-  test_job:
+  scrape:
     runs-on: ubuntu-latest
     steps:
-      - name: Echo a message
-        run: echo "Hello World! If you see this, the trigger is working."
+      - name: Initial test
+        run: echo "Foundation is solid."
