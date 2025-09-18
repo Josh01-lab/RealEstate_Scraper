@@ -1,33 +1,66 @@
-name: CI • Sanity
+name: sanity
 
 on:
   push:
-    branches: [ main, master, develop, feature/** ]
+    branches: [ main ]
+    paths:
+      - "src/**"
+      - "config/**"
+      - ".github/workflows/sanity.yml"
   pull_request:
+    paths:
+      - "src/**"
+      - "config/**"
 
 jobs:
   sanity:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
+          # fast linters
+          pip install ruff
 
-      # minimal env so config loads in dev mode
-      - name: Set defaults
+      - name: Lint
+        run: ruff check src || (echo "::warning::ruff warnings found"; exit 1)
+
+      - name: Import check
         run: |
-          echo "ENV=dev" >> $GITHUB_ENV
-          echo "SQLITE_DB=./data/db/central.db" >> $GITHUB_ENV
-          echo "PORTALS_CONFIG=./config/portals.json" >> $GITHUB_ENV
+          python - << 'PY'
+          from src.scrapers.property_scraper import PropertyScraper
+          print("PropertyScraper import OK")
+          PY
 
-      - name: Run sanity checks
-        run: python scripts/ci_sanity.py
+      - name: Parser smoke (fixtures)
+        env:
+          SCRAPING_MODE: requests
+          RATE_LIMIT_DELAY: "0.0"
+          MAX_LISTINGS: "3"
+        run: |
+          # Simple parser check against a saved HTML sample
+          python - << 'PY'
+          from pathlib import Path
+          import json
+          from src.scrapers.property_scraper import PropertyScraper
+          from src.config.paths import PORTALS_CONFIG
+
+          # load a small local HTML fixture (commit 1–2 to tests/fixtures/)
+          fx = Path("tests/fixtures/lamudi_detail_sample.html").read_text(encoding="utf-8")
+          ps = PropertyScraper(config_path=str(PORTALS_CONFIG))
+          cfg = next(c for c in ps.configs if c.portal_name == "lamudi_cebu")
+          parsed = ps._parse_listing(fx, "https://example/fixture", cfg)
+          needed = ["url","title","price","area","scraped_at"]
+          missing = [k for k in needed if parsed.get(k) is None]
+          if missing:
+            raise SystemExit(f"Parser missing keys: {missing}")
+          print("Parser smoke OK")
+          PY
