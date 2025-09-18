@@ -22,7 +22,18 @@ on:
         description: "requests | playwright"
         required: false
         default: "playwright"
+env:
+  TZ: Asia/Manila
+  PYTHONUNBUFFERED: "1"
+  # Fallbacks; workflow_dispatch can override these
+  SCRAPING_MODE: ${{ github.event.inputs.scraping_mode || 'playwright' }}
+  RATE_LIMIT_DELAY: ${{ github.event.inputs.rate_limit_delay || '1.2' }}
+  MAX_PAGES: ${{ github.event.inputs.max_pages || '1' }}
+  MAX_LISTINGS: ${{ github.event.inputs.max_listings || '30' }}
 
+  # Required by your app
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
 
 jobs:
   scrape:
