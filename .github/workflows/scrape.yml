@@ -1,7 +1,6 @@
 name: Nightly Lamudi Cebu Scrape
 
 on:
- workflow_dispatch:
   schedule:
     # GitHub cron runs in UTC. 3:00 AM Manila (UTC+8) == 19:00 UTC previous day
     - cron: "0 19 * * *"
