@@ -122,4 +122,5 @@ jobs:
           python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
 
       - name: Done
-        run: echo "✅ Nightly scrape completed."
+        run: echo " Nightly scrape completed."
+
