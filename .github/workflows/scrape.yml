@@ -38,6 +38,66 @@ env:
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Initial test
-        run: echo "Foundation is solid."
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # Only needed if SCRAPING_MODE=playwright
+      - name: Install Playwright (chromium)
+        if: env.SCRAPING_MODE == 'playwright'
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Echo effective env
+        run: |
+          echo "SCRAPING_MODE=${SCRAPING_MODE}"
+          echo "RATE_LIMIT_DELAY=${RATE_LIMIT_DELAY}"
+          echo "MAX_PAGES=${MAX_PAGES}"
+          echo "MAX_LISTINGS=${MAX_LISTINGS}"
+
+      - name: Run discovery
+        run: |
+          python -m src.runner.run_discovery --portal lamudi_cebu
+
+      - name: Capture run dir
+        id: rundir
+        shell: bash
+        run: |
+          dir=$(ls -1d scraper_output/run_* | tail -n1)
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Run dir: $dir"
+
+      - name: Ensure URLs file exists
+        run: |
+          test -f "${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_urls.jsonl" || (echo "No URLs staged" && exit 1)
+
+      - name: Run details
+        run: |
+          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
+
+      - name: Sanity peek (first 3 rows)
+        run: |
+          f="${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_listings.jsonl"
+          test -f "$f" || (echo "No listings.jsonl created" && exit 1)
+          head -n 3 "$f" || true
