@@ -1,0 +1,575 @@
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/.gitignore b/.gitignore[m
+[1mindex ee044d1..acc2249 100644[m
+[1m--- a/.gitignore[m
+[1m+++ b/.gitignore[m
+[36m@@ -17,3 +17,10 @@[m [mlogs/[m
+ # IDE[m
+ .vscode/[m
+ .idea/[m
+[32m+[m[32m.env[m
+[32m+[m[32mscraper_output/[m
+[32m+[m[32m*.log[m
+[32m+[m[32m*.sqlite[m
+[32m+[m[32m__pycache__/[m
+[32m+[m[32m.vscode/[m
+[32m+[m[32m.venv/[m
+[1mdiff --git a/src/__pycache__/config.cpython-310.pyc b/src/__pycache__/config.cpython-310.pyc[m
+[1mindex 5e0fff9..151c237 100644[m
+Binary files a/src/__pycache__/config.cpython-310.pyc and b/src/__pycache__/config.cpython-310.pyc differ
+[1mdiff --git a/src/db/__pycache__/supabase_writer.cpython-310.pyc b/src/db/__pycache__/supabase_writer.cpython-310.pyc[m
+[1mindex 0ea9fe7..ada9ad6 100644[m
+Binary files a/src/db/__pycache__/supabase_writer.cpython-310.pyc and b/src/db/__pycache__/supabase_writer.cpython-310.pyc differ
+[1mdiff --git a/src/runner/__pycache__/write_portal_dump_to_supabase.cpython-310.pyc b/src/runner/__pycache__/write_portal_dump_to_supabase.cpython-310.pyc[m
+[1mindex 01e12c9..4450b4d 100644[m
+Binary files a/src/runner/__pycache__/write_portal_dump_to_supabase.cpython-310.pyc and b/src/runner/__pycache__/write_portal_dump_to_supabase.cpython-310.pyc differ
+[1mdiff --git a/src/scrapers/__pycache__/property_scraper.cpython-310.pyc b/src/scrapers/__pycache__/property_scraper.cpython-310.pyc[m
+[1mindex a676fc0..0d2f107 100644[m
+Binary files a/src/scrapers/__pycache__/property_scraper.cpython-310.pyc and b/src/scrapers/__pycache__/property_scraper.cpython-310.pyc differ
+[1mdiff --git a/src/scrapers/property_scraper.py b/src/scrapers/property_scraper.py[m
+[1mindex e0c0494..aec8221 100644[m
+[1m--- a/src/scrapers/property_scraper.py[m
+[1m+++ b/src/scrapers/property_scraper.py[m
+[36m@@ -12,8 +12,8 @@[m [mfrom bs4 import BeautifulSoup[m
+ from requests.adapters import HTTPAdapter, Retry[m
+ from src.config import ENV_SCRAPE_MODE, ENV_RATE_DELAY, MAX_LISTINGS, MAX_PAGES[m
+ from src.utils.jsonld import _jsonld_iter, extract_jsonld_blocks, find_first[m
+[31m-[m
+[31m-[m
+[32m+[m[32mimport jsonlines[m[41m[m
+[32m+[m[32mfrom playwright.sync_api import sync_playwright, TimeoutError as PwTimeout[m[41m       [m
+ [m
+ [m
+ [m
+[36m@@ -330,52 +330,177 @@[m [mclass PropertyScraper:[m
+         self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} urls")[m
+         return all_urls[m
+ [m
+[31m-    def _ensure_playwright(self, cfg: "ScrapingConfig"):[m
+[31m-        if not PLAYWRIGHT_AVAILABLE:[m
+[31m-            return None[m
+[31m-        if getattr(self, "_pw_ctx", None):[m
+[31m-            return self._pw_ctx[m
+[32m+[m[32m    def _ensure_playwright(self, cfg):[m[41m[m
+[32m+[m[32m        if self._pw:[m[41m[m
+[32m+[m[32m            return self._pw_browser.new_context([m[41m[m
+[32m+[m[32m                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "[m[41m[m
+[32m+[m[32m                            "AppleWebKit/537.36 (KHTML, like Gecko) "[m[41m[m
+[32m+[m[32m                            "Chrome/121.0.0.0 Safari/537.36"),[m[41m[m
+[32m+[m[32m                locale="en-PH",[m[41m[m
+[32m+[m[32m                timezone_id="Asia/Manila",[m[41m[m
+[32m+[m[32m                viewport={"width": 1366, "height": 864},[m[41m[m
+[32m+[m[32m                device_scale_factor=1.0,[m[41m[m
+[32m+[m[32m                extra_http_headers={[m[41m[m
+[32m+[m[32m                    "Accept-Language": "en-PH,en;q=0.9",[m[41m[m
+[32m+[m[32m                    "DNT": "1",[m[41m[m
+[32m+[m[32m                    "Upgrade-Insecure-Requests": "1",[m[41m[m
+[32m+[m[32m                },[m[41m[m
+[32m+[m[32m            )[m[41m[m
+ [m
+[32m+[m[32m        from playwright.sync_api import sync_playwright[m[41m[m
+         self._pw = sync_playwright().start()[m
+[31m-        self._pw_browser = self._pw.chromium.launch(headless=True)[m
+[31m-        self._pw_ctx = self._pw_browser.new_context(user_agent=cfg.headers.get("User-Agent"))[m
+[31m-        return self._pw_ctx[m
+[32m+[m[32m        self._pw_browser = self._pw.chromium.launch(headless=True, args=[[m[41m[m
+[32m+[m[32m            "--disable-blink-features=AutomationControlled",[m[41m[m
+[32m+[m[32m            "--no-sandbox",[m[41m[m
+[32m+[m[32m            "--disable-dev-shm-usage",[m[41m[m
+[32m+[m[32m        ])[m[41m[m
+[32m+[m[32m        return self._pw_browser.new_context([m[41m[m
+[32m+[m[32m            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "[m[41m[m
+[32m+[m[32m                        "AppleWebKit/537.36 (KHTML, like Gecko) "[m[41m[m
+[32m+[m[32m                        "Chrome/121.0.0.0 Safari/537.36"),[m[41m[m
+[32m+[m[32m            locale="en-PH",[m[41m[m
+[32m+[m[32m            timezone_id="Asia/Manila",[m[41m[m
+[32m+[m[32m            viewport={"width": 1366, "height": 864},[m[41m[m
+[32m+[m[32m            device_scale_factor=1.0,[m[41m[m
+[32m+[m[32m            extra_http_headers={[m[41m[m
+[32m+[m[32m                "Accept-Language": "en-PH,en;q=0.9",[m[41m[m
+[32m+[m[32m                "DNT": "1",[m[41m[m
+[32m+[m[32m                "Upgrade-Insecure-Requests": "1",[m[41m[m
+[32m+[m[32m            },[m[41m[m
+[32m+[m[32m        )[m[41m[m
+[32m+[m[41m   [m
+[32m+[m[41m[m
+[32m+[m[32m    def _fetch_with_playwright(self, url, cfg):[m[41m[m
+[32m+[m[32m        """Return fully-rendered HTML via Playwright with sensible defaults for Lamudi."""[m[41m[m
+[32m+[m[32m        # Start Playwright & browser once[m[41m[m
+[32m+[m[32m        if not self._pw:[m[41m[m
+[32m+[m[32m            self._pw = sync_playwright().start()[m[41m[m
+[32m+[m[32m        if not self._pw_browser:[m[41m[m
+[32m+[m[32m            # A couple args help with anti-automation heuristics[m[41m[m
+[32m+[m[32m            self._pw_browser = self._pw.chromium.launch([m[41m[m
+[32m+[m[32m                headless=True,[m[41m[m
+[32m+[m[32m                args=[[m[41m[m
+[32m+[m[32m                    "--disable-blink-features=AutomationControlled",[m[41m[m
+[32m+[m[32m                    "--no-sandbox",[m[41m[m
+[32m+[m[32m                    "--disable-dev-shm-usage",[m[41m[m
+[32m+[m[32m                ],[m[41m[m
+[32m+[m[32m            )[m[41m[m
+ [m
+[31m-    def _fetch_with_playwright(self, url: str, cfg: "ScrapingConfig") -> Optional[str]:[m
+[31m-        if not PLAYWRIGHT_AVAILABLE:[m
+[31m-            return None[m
+[31m-        ctx = self._ensure_playwright(cfg)[m
+[31m-        page = ctx.new_page()[m
+[31m-        page.set_default_navigation_timeout(cfg.timeout * 1000)[m
+[31m-        try:[m
+[31m-            page.goto(url, wait_until="networkidle", timeout=60000)[m
+[31m-            # try to accept cookies[m
+[32m+[m[32m        # Retry a couple of times for flaky loads[m[41m[m
+[32m+[m[32m        attempts = 0[m[41m[m
+[32m+[m[32m        last_err = None[m[41m[m
+[32m+[m[32m        while attempts < 3:[m[41m[m
+[32m+[m[32m            attempts += 1[m[41m[m
+[32m+[m[32m            ctx = None[m[41m[m
+[32m+[m[32m            page = None[m[41m[m
+             try:[m
+[31m-                page.locator([m
+[31m-                    "button:has-text('Accept'), button:has-text('I agree'), "[m
+[31m-                    "#onetrust-accept-btn-handler, button[aria-label*='accept' i]"[m
+[31m-                ).first.click(timeout=2500)[m
+[31m-            except Exception:[m
+[31m-                pass[m
+[31m-            # wait for something meaningful[m
+[31m-            wait_for = cfg.wait_for_selector[m
+[31m-            if "/property/" in url:[m
+[31m-                wait_for = (cfg.detail_selectors or {}).get("_detail_wait_for_selector") or wait_for[m
+[31m-            if wait_for:[m
+[31m-                page.wait_for_selector(wait_for, timeout=cfg.timeout * 1000, state="attached")[m
+[31m-            try:[m
+[31m-                page.wait_for_load_state("networkidle", timeout=3000)[m
+[31m-            except Exception:[m
+[31m-                pass[m
+[31m-            return page.content()[m
+[31m-        except Exception as e:[m
+[31m-            self.logger.warning(f"Playwright error {url}: {e}")[m
+[31m-            return None[m
+[31m-        finally:[m
+[31m-            try:[m
+[31m-                page.close()[m
+[31m-            except Exception:[m
+[31m-                pass[m
+[32m+[m[32m                ctx = self._pw_browser.new_context([m[41m[m
+[32m+[m[32m                    user_agent=([m[41m[m
+[32m+[m[32m                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "[m[41m[m
+[32m+[m[32m                        "AppleWebKit/537.36 (KHTML, like Gecko) "[m[41m[m
+[32m+[m[32m                        "Chrome/122.0.0.0 Safari/537.36"[m[41m[m
+[32m+[m[32m                    ),[m[41m[m
+[32m+[m[32m                    locale="en-PH",[m[41m[m
+[32m+[m[32m                    timezone_id="Asia/Manila",[m[41m[m
+[32m+[m[32m                    viewport={"width": 1366, "height": 850},[m[41m[m
+[32m+[m[32m                    java_script_enabled=True,[m[41m[m
+[32m+[m[32m                    bypass_csp=True,[m[41m[m
+[32m+[m[32m                    # Block big assets to speed up[m[41m[m
+[32m+[m[32m                    # (keeping CSS and fonts; images/video blocked)[m[41m[m
+[32m+[m[32m                )[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                # Block heavy assets[m[41m[m
+[32m+[m[32m                def _route(route):[m[41m[m
+[32m+[m[32m                    req = route.request[m[41m[m
+[32m+[m[32m                    if req.resource_type in ("image", "media"):[m[41m[m
+[32m+[m[32m                        return route.abort()[m[41m[m
+[32m+[m[32m                    return route.continue_()[m[41m[m
+[32m+[m[32m                ctx.route("*/", _route)[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                page = ctx.new_page()[m[41m[m
+[32m+[m[32m                page.set_default_timeout(max(20000, int(cfg.timeout * 1000)))[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                # Go to page[m[41m[m
+[32m+[m[32m                page.goto(url, wait_until="domcontentloaded", timeout=60000)[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                # Try to dismiss cookie/consent banners (best-effort)[m[41m[m
+[32m+[m[32m                for sel in [[m[41m[m
+[32m+[m[32m                    "button:has-text('Accept')",[m[41m[m
+[32m+[m[32m                    "button:has-text('I Accept')",[m[41m[m
+[32m+[m[32m                    "button#onetrust-accept-btn-handler",[m[41m[m
+[32m+[m[32m                    "button[aria-label='Accept all']",[m[41m[m
+[32m+[m[32m                ]:[m[41m[m
+[32m+[m[32m                    try:[m[41m[m
+[32m+[m[32m                        btn = page.locator(sel)[m[41m[m
+[32m+[m[32m                        if btn.count() > 0:[m[41m[m
+[32m+[m[32m                            btn.first.click(timeout=1500)[m[41m[m
+[32m+[m[32m                            break[m[41m[m
+[32m+[m[32m                    except Exception:[m[41m[m
+[32m+[m[32m                        pass[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                # Proof-of-content waits (any one is enough)[m[41m[m
+[32m+[m[32m                # Use a short chain of candidates to be resilient[m[41m[m
+[32m+[m[32m                proof_selectors = [[m[41m[m
+[32m+[m[32m                    "h1[data-testid='ad-title']",[m[41m[m
+[32m+[m[32m                    "[data-testid='description']",[m[41m[m
+[32m+[m[32m                    "[data-testid='publish-date']",[m[41m[m
+[32m+[m[32m                    ".ListingDetail__Title",[m[41m[m
+[32m+[m[32m                    "main [class*='Listing']",   # very loose fallback[m[41m[m
+[32m+[m[32m                ][m[41m[m
+[32m+[m[32m                got_content = False[m[41m[m
+[32m+[m[32m                for sel in proof_selectors:[m[41m[m
+[32m+[m[32m                    try:[m[41m[m
+[32m+[m[32m                        page.wait_for_selector(sel, timeout=10000)[m[41m[m
+[32m+[m[32m                        got_content = True[m[41m[m
+[32m+[m[32m                        break[m[41m[m
+[32m+[m[32m                    except PwTimeout:[m[41m[m
+[32m+[m[32m                        continue[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                # Gentle scroll to trigger lazy content[m[41m[m
+[32m+[m[32m                try:[m[41m[m
+[32m+[m[32m                    page.evaluate("""[m[41m[m
+[32m+[m[32m                        (async () => {[m[41m[m
+[32m+[m[32m                        for (let y=0; y<=1500; y+=300) {[m[41m[m
+[32m+[m[32m                            window.scrollTo(0, y);[m[41m[m
+[32m+[m[32m                            await new Promise(r => setTimeout(r, 200));[m[41m[m
+[32m+[m[32m                        }[m[41m[m
+[32m+[m[32m                        })();[m[41m[m
+[32m+[m[32m                    """)[m[41m[m
+[32m+[m[32m                except Exception:[m[41m[m
+[32m+[m[32m                    pass[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                # If we didn’t see proof of content, try one last wait on <time> or .meta[m[41m[m
+[32m+[m[32m                if not got_content:[m[41m[m
+[32m+[m[32m                    try:[m[41m[m
+[32m+[m[32m                        page.wait_for_selector("time, .meta, .posted-date", timeout=6000)[m[41m[m
+[32m+[m[32m                    except PwTimeout:[m[41m[m
+[32m+[m[32m                        pass[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m                html = page.content()[m[41m[m
+[32m+[m[32m                return html[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m            except Exception as e:[m[41m[m
+[32m+[m[32m                last_err = e[m[41m[m
+[32m+[m[32m                # brief backoff[m[41m[m
+[32m+[m[32m                import time as _t[m[41m[m
+[32m+[m[32m                _t.sleep(1.5 * attempts)[m[41m[m
+[32m+[m[32m            finally:[m[41m[m
+[32m+[m[32m                # Always cleanup[m[41m[m
+[32m+[m[32m                try:[m[41m[m
+[32m+[m[32m                    if page:[m[41m[m
+[32m+[m[32m                        page.close()[m[41m[m
+[32m+[m[32m                except Exception:[m[41m[m
+[32m+[m[32m                    pass[m[41m[m
+[32m+[m[32m                try:[m[41m[m
+[32m+[m[32m                    if ctx:[m[41m[m
+[32m+[m[32m                        ctx.close()[m[41m[m
+[32m+[m[32m                except Exception:[m[41m[m
+[32m+[m[32m                    pass[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        # If we get here, all attempts failed[m[41m[m
+[32m+[m[32m        self.logger.warning(f"Playwright error {url}: {last_err}")[m[41m[m
+[32m+[m[32m        return None[m[41m[m
+[32m+[m[41m[m
+ [m
+     def _get_page_content(self, url: str, cfg: "ScrapingConfig") -> Optional[str]:[m
+         mode = (cfg.scraping_mode or "requests").lower()[m
+[36m@@ -478,10 +603,10 @@[m [mclass PropertyScraper:[m
+ [m
+     # --- Listing detail parse -------------------------------------[m
+     def _parse_listing(self, html: str, url: str, cfg) -> Optional[dict]:[m
+[31m-        """Parse a Lamudi listing page into a dict. Best-effort + JSON-LD fallback."""[m
+[32m+[m[32m        """Parse a Lamudi listing page into a dict. DOM first, then JSON-LD fallback."""[m[41m[m
+         soup = BeautifulSoup(html or "", "lxml")[m
+ [m
+[31m-        # --- tiny local helpers (avoid external deps)[m
+[32m+[m[32m        # ---------- tiny local helpers ----------[m[41m[m
+         def _norm_txt(x):[m
+             return (x or "").replace("\u00a0", " ").strip()[m
+ [m
+[36m@@ -508,11 +633,17 @@[m [mclass PropertyScraper:[m
+             return None[m
+ [m
+         def _parse_rel_to_iso(text):[m
+[31m-            # Works if REL_RE is defined at module level (you have it already)[m
+[31m-            try:[m
+[31m-                m = REL_RE.search(text)[m
+[31m-            except NameError:[m
+[31m-                m = None[m
+[32m+[m[32m            # works with "X days/weeks/months/years/hours/minutes ago"[m[41m[m
+[32m+[m[32m            REL_RE = re.compile([m[41m[m
+[32m+[m[32m                r"(?:(?P<years>\d+)\s*year[s]?)?\s*,?\s*"[m[41m[m
+[32m+[m[32m                r"(?:(?P<months>\d+)\s*month[s]?)?\s*,?\s*"[m[41m[m
+[32m+[m[32m                r"(?:(?P<weeks>\d+)\s*week[s]?)?\s*,?\s*"[m[41m[m
+[32m+[m[32m                r"(?:(?P<days>\d+)\s*day[s]?)?\s*,?\s*"[m[41m[m
+[32m+[m[32m                r"(?:(?P<hours>\d+)\s*hour[s]?)?\s*,?\s*"[m[41m[m
+[32m+[m[32m                r"(?:(?P<minutes>\d+)\s*minute[s]?)?\s*ago",[m[41m[m
+[32m+[m[32m                flags=re.I,[m[41m[m
+[32m+[m[32m            )[m[41m[m
+[32m+[m[32m            m = REL_RE.search(text or "")[m[41m[m
+             if not m:[m
+                 return None[m
+             parts = {k: int(v) for k, v in m.groupdict().items() if v}[m
+[36m@@ -524,7 +655,6 @@[m [mclass PropertyScraper:[m
+                 + parts.get("months", 0) * 30[m
+                 + parts.get("years", 0) * 365[m
+             )[m
+[31m-            from datetime import timedelta[m
+             ts = datetime.now(timezone.utc) - timedelta([m
+                 days=days,[m
+                 hours=parts.get("hours", 0),[m
+[36m@@ -541,7 +671,7 @@[m [mclass PropertyScraper:[m
+                 try:[m
+                     blocks.append(json.loads(raw))[m
+                 except Exception:[m
+[31m-                    # salvage common multi-object blobs[m
+[32m+[m[32m                    # salvage multiple json objects glued together[m[41m[m
+                     try:[m
+                         parts = raw.replace("}\n{", "}\n\n{").split("\n\n")[m
+                         for p in parts:[m
+[36m@@ -572,14 +702,14 @@[m [mclass PropertyScraper:[m
+                         return node[m
+             return None[m
+ [m
+[31m-        # --- title[m
+[32m+[m[32m        # ---------- title ----------[m[41m[m
+         title = _first_text(soup, [[m
+             "h1[data-testid='ad-title']",[m
+             "h1.ListingDetail__Title, h1.listing-title, h1",[m
+             "meta[property='og:title']",[m
+         ])[m
+ [m
+[31m-        # --- price (DOM)[m
+[32m+[m[32m        # ---------- price (DOM) ----------[m[41m[m
+         price_text = _first_text(soup, [[m
+             "[data-testid='ad-price']",[m
+             ".ListingDetail__Price, .price, .Price__Value",[m
+[36m@@ -594,7 +724,7 @@[m [mclass PropertyScraper:[m
+             cur = "PHP" if ("₱" in price_text or "php" in price_text.lower()) else None[m
+             price = {"raw": price_text, "currency": cur, "value": val, "period": per}[m
+ [m
+[31m-        # --- area[m
+[32m+[m[32m        # ---------- area ----------[m[41m[m
+         area = None[m
+         full_text = soup.get_text(" ", strip=True)[m
+         m = re.search(r"(\d[\d,\.]*)\s*(sqm|m2|m²)", full_text, flags=re.I)[m
+[36m@@ -604,20 +734,20 @@[m [mclass PropertyScraper:[m
+             except Exception:[m
+                 area = None[m
+ [m
+[31m-        # --- address[m
+[32m+[m[32m        # ---------- address ----------[m[41m[m
+         address = _first_text(soup, [[m
+             "[data-testid='address'], .ListingDetail__Address, .address",[m
+             "span[itemprop='address'], meta[property='og:street-address']",[m
+             ".Breadcrumbs, nav[aria-label='breadcrumb']",[m
+         ])[m
+ [m
+[31m-        # --- description[m
+[32m+[m[32m        # ---------- description ----------[m[41m[m
+         description = _first_text(soup, [[m
+             "[data-testid='description'], .ListingDetail__Description, .description",[m
+             "section[data-testid='description']",[m
+         ])[m
+ [m
+[31m-        # --- published_at (DOM first)[m
+[32m+[m[32m        # ---------- published_at (DOM first) ----------[m[41m[m
+         published_text = _first_attr_or_text(soup, [[m
+             "[data-testid='publish-date']",[m
+             "time[datetime]",[m
+[36m@@ -625,25 +755,31 @@[m [mclass PropertyScraper:[m
+             ".posted-date time, .posted_date time",[m
+             ".meta time"[m
+         ], attr="datetime")[m
+[32m+[m[41m[m
+         if not published_text:[m
+             published_text = _first_text(soup, [[m
+                 "[data-testid='publish-date']",[m
+[31m-                ".ListingDetail__Meta, .posted-date, .posted_date, .meta"[m
+[32m+[m[32m                ".ListingDetail__Meta, .posted-date, .posted_date, .meta",[m[41m[m
+[32m+[m[32m                ".date",   # <-- add this line[m[41m[m
+             ])[m
+ [m
+[32m+[m[41m[m
+         published_at = None[m
+[31m-        if published_text:[m
+[31m-            if re.search(r"\d{4}-\d{2}-\d{2}", published_text):[m
+[32m+[m[32m        if published_text and not published_at:[m[41m[m
+[32m+[m[32m            # try to extract the leading date token[m[41m[m
+[32m+[m[32m            m = re.search(r"(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})", published_text)[m[41m[m
+[32m+[m[32m            if m:[m[41m[m
+                 try:[m
+[31m-                    published_at = dtparse.parse(published_text).astimezone(timezone.utc).isoformat()[m
+[32m+[m[32m                    dt = dtparse.parse(m.group(1), dayfirst=True).astimezone(timezone.utc)[m[41m[m
+[32m+[m[32m                    published_at = dt.isoformat()[m[41m[m
+                 except Exception:[m
+[31m-                    published_at = None[m
+[31m-            else:[m
+[31m-                published_at = _parse_rel_to_iso(published_text)[m
+[32m+[m[32m                    pass[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        # ---------- JSON-LD fallback (dates, type, price if missing) ----------[m[41m[m
+[32m+[m[32m        blocks = _jsonld_blocks(soup)[m[41m[m
+ [m
+[31m-        # --- JSON-LD fallback (fills missing published_*)[m
+[32m+[m[32m        # published_* via JSON-LD if still missing[m[41m[m
+         if not published_text:[m
+[31m-            blocks = _jsonld_blocks(soup)[m
+             node = _find_first(blocks, "Offer", "Product", "NewsArticle", "Article", "CreativeWork") or {}[m
+             for key in ("datePublished", "datePosted", "dateCreated", "uploadDate", "pubDate"):[m
+                 v = node.get(key)[m
+[36m@@ -655,18 +791,31 @@[m [mclass PropertyScraper:[m
+                     except Exception:[m
+                         pass[m
+ [m
+[31m-        # --- property type (best effort)[m
+[32m+[m[32m        # property_type[m[41m[m
+         property_type = None[m
+[31m-        try:[m
+[31m-            blocks = blocks if 'blocks' in locals() else _jsonld_blocks(soup)[m
+[31m-            product = _find_first(blocks, "Product", "Offer", "RealEstateAgent") or {}[m
+[31m-            property_type = product.get("category") or product.get("@type")[m
+[31m-        except Exception:[m
+[31m-            pass[m
+[31m-        if not property_type:[m
+[31m-            if re.search(r"\boffice|serviced office|commercial\b", full_text, re.I):[m
+[31m-                property_type = "Offices"[m
+[31m-[m
+[32m+[m[32m        product = _find_first(blocks, "Product", "Offer", "RealEstateAgent") or {}[m[41m[m
+[32m+[m[32m        property_type = product.get("category") or product.get("@type")[m[41m[m
+[32m+[m[32m        if not property_type and re.search(r"\boffice|serviced office|commercial\b", full_text, re.I):[m[41m[m
+[32m+[m[32m            property_type = "Offices"[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        # price via JSON-LD if DOM missing[m[41m[m
+[32m+[m[32m        if (not price) or (price and price.get("value") is None):[m[41m[m
+[32m+[m[32m            offer = _find_first(blocks, "Offer") or {}[m[41m[m
+[32m+[m[32m            jd_price = offer.get("price") or (offer.get("offers") or {}).get("price") if isinstance(offer.get("offers"), dict) else offer.get("price")[m[41m[m
+[32m+[m[32m            jd_currency = offer.get("priceCurrency") or (offer.get("offers") or {}).get("priceCurrency") if isinstance(offer.get("offers"), dict) else offer.get("priceCurrency")[m[41m[m
+[32m+[m[32m            if jd_price:[m[41m[m
+[32m+[m[32m                try:[m[41m[m
+[32m+[m[32m                    val = float(str(jd_price).replace(",", ""))[m[41m[m
+[32m+[m[32m                except Exception:[m[41m[m
+[32m+[m[32m                    val = None[m[41m[m
+[32m+[m[32m                price = {[m[41m[m
+[32m+[m[32m                    "raw": (price or {}).get("raw") or str(jd_price),[m[41m[m
+[32m+[m[32m                    "currency": (price or {}).get("currency") or jd_currency,[m[41m[m
+[32m+[m[32m                    "value": val,[m[41m[m
+[32m+[m[32m                    "period": (price or {}).get("period"),[m[41m[m
+[32m+[m[32m                }[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        # ---------- final payload ----------[m[41m[m
+         return {[m
+             "url": url,[m
+             "title": title,[m
+[36m@@ -676,71 +825,83 @@[m [mclass PropertyScraper:[m
+             "price": price,[m
+             "area": area,[m
+             "published_at_text": published_text,[m
+[31m-            "published_at": published_at, # ISO8601 or None[m
+[32m+[m[32m            "published_at": published_at,[m[41m[m
+             "scraped_at": datetime.now(timezone.utc).isoformat(),[m
+         }[m
+ [m
+ [m
+ [m
+     # --- Details runner --------------------------------------------[m
+[31m-    def detail_extraction_stage(self, urls: Optional[List[str]], cfg: "ScrapingConfig") -> int:[m
+[31m-        """[m
+[31m-        Read each URL, parse a listing, and write a JSONL of dict rows.[m
+[31m-        _parse_listing() must return either a dict or None.[m
+[31m-        """[m
+[31m-        # If urls wasn't passed, read from the staged urls file.[m
+[31m-        if urls is None:[m
+[31m-            urls_file = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"[m
+[31m-            if not urls_file.exists():[m
+[31m-                raise FileNotFoundError(f"Not found: {urls_file}")[m
+[31m-            urls = [][m
+[31m-            with jsonlines.open(urls_file, "r") as r:[m
+[31m-                for row in r:[m
+[31m-                    if row and row.get("url"):[m
+[31m-                        urls.append(row["url"])[m
+[32m+[m[32m    def detail_extraction_stage(self, urls: list[str], cfg) -> int:[m[41m[m
+[32m+[m[32m        """Fetch each URL, parse details, write staged listings.jsonl, and log failures."""[m[41m[m
+ [m
+         out_file = self.dirs["staged"] / f"{cfg.portal_name}_listings.jsonl"[m
+[32m+[m[32m        fail_file = self.dirs["staged"] / f"{cfg.portal_name}_failures.jsonl"[m[41m[m
+ [m
+[31m-        ok = fail = 0[m
+[31m-        with jsonlines.open(out_file, "w") as w:[m
+[31m-            self.logger.info("Starting detail extraction for %s with %d URLs", cfg.portal_name, len(urls))[m
+[31m-            for i, u in enumerate(urls, 1):[m
+[31m-                self.logger.info("[%d/%d] detail -> %s", i, len(urls), u)[m
+[32m+[m[32m        ok = 0[m[41m[m
+[32m+[m[32m        fails = [][m[41m[m
+ [m
+[31m-                html = self._get_page_content(u, cfg)[m
+[31m-                if not html:[m
+[31m-                    fail += 1[m
+[31m-                    continue[m
+[32m+[m[32m        self.logger.info(f"Starting detail extraction for {cfg.portal_name} with {len(urls)} URLs")[m[41m[m
+ [m
+[32m+[m[32m        with jsonlines.open(out_file, "w") as w:[m[41m[m
+[32m+[m[32m            for i, u in enumerate(urls, 1):[m[41m[m
+[32m+[m[32m                self.logger.info(f"[{i}/{len(urls)}] detail -> {u}")[m[41m[m
+                 try:[m
+[31m-                    listing = self._parse_listing(html, u, cfg)[m
+[32m+[m[32m                    html = self._get_page_content(u, cfg)[m[41m[m
+[32m+[m[32m                    if not html:[m[41m[m
+[32m+[m[32m                        fails.append({"url": u, "reason": "no_html"})[m[41m[m
+[32m+[m[32m                        self.logger.warning(f"No HTML fetched, skipping: {u}")[m[41m[m
+[32m+[m[32m                        continue[m[41m[m
+ [m
+[32m+[m[32m                    listing = self._parse_listing(html, u, cfg)[m[41m[m
+                     if not listing:[m
+[31m-                        fail += 1[m
+[32m+[m[32m                        fails.append({"url": u, "reason": "parse_returned_none"})[m[41m[m
+[32m+[m[32m                        self.logger.warning(f"Parse returned None, skipping: {u}")[m[41m[m
+                         continue[m
+ [m
+[31m-                    # If someone returns a dataclass by mistake, convert once.[m
+[31m-                    from dataclasses import is_dataclass, asdict as dc_asdict[m
+[31m-                    if is_dataclass(listing):[m
+[31m-                        listing = dc_asdict(listing)[m
+[31m-[m
+[31m-                    if not isinstance(listing, dict):[m
+[31m-                        self.logger.warning("Parse returned non-dict type: %r", type(listing))[m
+[31m-                        fail += 1[m
+[32m+[m[32m                    # hard guards so we know WHY we skipped[m[41m[m
+[32m+[m[32m                    if not listing.get("title"):[m[41m[m
+[32m+[m[32m                        fails.append({"url": u, "reason": "missing_title"})[m[41m[m
+[32m+[m[32m                        self.logger.warning(f"Missing title, skipping: {u}")[m[41m[m
+                         continue[m
+ [m
+[32m+[m[32m                    # If you require address/price etc., add more required-key checks here:[m[41m[m
+[32m+[m[32m                    # for req in ("address", "price"):[m[41m[m
+[32m+[m[32m                    #     if not listing.get(req):[m[41m[m
+[32m+[m[32m                    #         fails.append({"url": u, "reason": f"missing_{req}"})[m[41m[m
+[32m+[m[32m                    #         self.logger.warning(f"Missing {req}, skipping: {u}")[m[41m[m
+[32m+[m[32m                    #         break[m[41m[m
+[32m+[m[32m                    # else:[m[41m[m
+[32m+[m[32m                    #     w.write(listing); ok += 1; continue[m[41m[m
+[32m+[m[41m[m
+                     w.write(listing)[m
+                     ok += 1[m
+ [m
+                 except Exception as e:[m
+[31m-                    self.logger.exception("Parse error %s: %s", u, e)[m
+[31m-                    fail += 1[m
+[31m-[m
+[31m-                time.sleep(cfg.rate_limit_delay)[m
+[31m-[m
+[31m-        self.logger.info("Details done %s: %d rows (fail %d)", cfg.portal_name, ok, fail)[m
+[32m+[m[32m                    # include exception name + message for root-cause analysis[m[41m[m
+[32m+[m[32m                    fails.append({[m[41m[m
+[32m+[m[32m                        "url": u,[m[41m[m
+[32m+[m[32m                        "reason": f"exception:{type(e).__name__}",[m[41m[m
+[32m+[m[32m                        "detail": str(e)[:1000],[m[41m[m
+[32m+[m[32m                    })[m[41m[m
+[32m+[m[32m                    # log full traceback in console/log file[m[41m[m
+[32m+[m[32m                    self.logger.warning(f"Parse error {u}: {e}", exc_info=True)[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        # write failures to a separate JSONL for inspection[m[41m[m
+[32m+[m[32m        if fails:[m[41m[m
+[32m+[m[32m            with jsonlines.open(fail_file, "w") as fw:[m[41m[m
+[32m+[m[32m                for row in fails:[m[41m[m
+[32m+[m[32m                    row["logged_at"] = datetime.now(timezone.utc).isoformat()[m[41m[m
+[32m+[m[32m                    fw.write(row)[m[41m[m
+[32m+[m[41m[m
+[32m+[m[32m        self.logger.info(f"Details done {cfg.portal_name}: {ok} rows (fail {len(fails)})")[m[41m[m
+[32m+[m[32m        if fails:[m[41m[m
+[32m+[m[32m            self.logger.info(f"Failure log written: {fail_file}")[m[41m[m
+[32m+[m[32m        self.logger.info(f"✅ Details complete: {ok} listings")[m[41m[m
+[32m+[m[32m        self.logger.info(f"Wrote: {out_file}")[m[41m[m
+         return ok[m
+ [m
+[32m+[m[41m[m
+     # --- Cleanup ---------------------------------------------------[m
+     def __del__(self):[m
+         try:[m
