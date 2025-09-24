@@ -17,3 +17,10 @@ logs/
 # IDE
 .vscode/
 .idea/
+.env
+scraper_output/
+*.log
+*.sqlite
+__pycache__/
+.vscode/
+.venv/

@@ -12,8 +12,8 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter, Retry
 from src.config import ENV_SCRAPE_MODE, ENV_RATE_DELAY, MAX_LISTINGS, MAX_PAGES
 from src.utils.jsonld import _jsonld_iter, extract_jsonld_blocks, find_first
-
-
+import jsonlines
+from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout       
 
 
 
@@ -330,52 +330,177 @@ class PropertyScraper:
         self.logger.info(f"Discovery done {cfg.portal_name}: {len(all_urls)} urls")
         return all_urls
 
-    def _ensure_playwright(self, cfg: "ScrapingConfig"):
-        if not PLAYWRIGHT_AVAILABLE:
-            return None
-        if getattr(self, "_pw_ctx", None):
-            return self._pw_ctx
+    def _ensure_playwright(self, cfg):
+        if self._pw:
+            return self._pw_browser.new_context(
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/121.0.0.0 Safari/537.36"),
+                locale="en-PH",
+                timezone_id="Asia/Manila",
+                viewport={"width": 1366, "height": 864},
+                device_scale_factor=1.0,
+                extra_http_headers={
+                    "Accept-Language": "en-PH,en;q=0.9",
+                    "DNT": "1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+            )
 
+        from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
-        self._pw_browser = self._pw.chromium.launch(headless=True)
-        self._pw_ctx = self._pw_browser.new_context(user_agent=cfg.headers.get("User-Agent"))
-        return self._pw_ctx
+        self._pw_browser = self._pw.chromium.launch(headless=True, args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ])
+        return self._pw_browser.new_context(
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/121.0.0.0 Safari/537.36"),
+            locale="en-PH",
+            timezone_id="Asia/Manila",
+            viewport={"width": 1366, "height": 864},
+            device_scale_factor=1.0,
+            extra_http_headers={
+                "Accept-Language": "en-PH,en;q=0.9",
+                "DNT": "1",
+                "Upgrade-Insecure-Requests": "1",
+            },
+        )
+   
 
-    def _fetch_with_playwright(self, url: str, cfg: "ScrapingConfig") -> Optional[str]:
-        if not PLAYWRIGHT_AVAILABLE:
-            return None
-        ctx = self._ensure_playwright(cfg)
-        page = ctx.new_page()
-        page.set_default_navigation_timeout(cfg.timeout * 1000)
-        try:
-            page.goto(url, wait_until="networkidle", timeout=60000)
-            # try to accept cookies
+    def _fetch_with_playwright(self, url, cfg):
+        """Return fully-rendered HTML via Playwright with sensible defaults for Lamudi."""
+        # Start Playwright & browser once
+        if not self._pw:
+            self._pw = sync_playwright().start()
+        if not self._pw_browser:
+            # A couple args help with anti-automation heuristics
+            self._pw_browser = self._pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+
+        # Retry a couple of times for flaky loads
+        attempts = 0
+        last_err = None
+        while attempts < 3:
+            attempts += 1
+            ctx = None
+            page = None
             try:
-                page.locator(
-                    "button:has-text('Accept'), button:has-text('I agree'), "
-                    "#onetrust-accept-btn-handler, button[aria-label*='accept' i]"
-                ).first.click(timeout=2500)
-            except Exception:
-                pass
-            # wait for something meaningful
-            wait_for = cfg.wait_for_selector
-            if "/property/" in url:
-                wait_for = (cfg.detail_selectors or {}).get("_detail_wait_for_selector") or wait_for
-            if wait_for:
-                page.wait_for_selector(wait_for, timeout=cfg.timeout * 1000, state="attached")
-            try:
-                page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
-            return page.content()
-        except Exception as e:
-            self.logger.warning(f"Playwright error {url}: {e}")
-            return None
-        finally:
-            try:
-                page.close()
-            except Exception:
-                pass
+                ctx = self._pw_browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/122.0.0.0 Safari/537.36"
+                    ),
+                    locale="en-PH",
+                    timezone_id="Asia/Manila",
+                    viewport={"width": 1366, "height": 850},
+                    java_script_enabled=True,
+                    bypass_csp=True,
+                    # Block big assets to speed up
+                    # (keeping CSS and fonts; images/video blocked)
+                )
+
+                # Block heavy assets
+                def _route(route):
+                    req = route.request
+                    if req.resource_type in ("image", "media"):
+                        return route.abort()
+                    return route.continue_()
+                ctx.route("*/", _route)
+
+                page = ctx.new_page()
+                page.set_default_timeout(max(20000, int(cfg.timeout * 1000)))
+
+                # Go to page
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+                # Try to dismiss cookie/consent banners (best-effort)
+                for sel in [
+                    "button:has-text('Accept')",
+                    "button:has-text('I Accept')",
+                    "button#onetrust-accept-btn-handler",
+                    "button[aria-label='Accept all']",
+                ]:
+                    try:
+                        btn = page.locator(sel)
+                        if btn.count() > 0:
+                            btn.first.click(timeout=1500)
+                            break
+                    except Exception:
+                        pass
+
+                # Proof-of-content waits (any one is enough)
+                # Use a short chain of candidates to be resilient
+                proof_selectors = [
+                    "h1[data-testid='ad-title']",
+                    "[data-testid='description']",
+                    "[data-testid='publish-date']",
+                    ".ListingDetail__Title",
+                    "main [class*='Listing']",   # very loose fallback
+                ]
+                got_content = False
+                for sel in proof_selectors:
+                    try:
+                        page.wait_for_selector(sel, timeout=10000)
+                        got_content = True
+                        break
+                    except PwTimeout:
+                        continue
+
+                # Gentle scroll to trigger lazy content
+                try:
+                    page.evaluate("""
+                        (async () => {
+                        for (let y=0; y<=1500; y+=300) {
+                            window.scrollTo(0, y);
+                            await new Promise(r => setTimeout(r, 200));
+                        }
+                        })();
+                    """)
+                except Exception:
+                    pass
+
+                # If we didn’t see proof of content, try one last wait on <time> or .meta
+                if not got_content:
+                    try:
+                        page.wait_for_selector("time, .meta, .posted-date", timeout=6000)
+                    except PwTimeout:
+                        pass
+
+                html = page.content()
+                return html
+
+            except Exception as e:
+                last_err = e
+                # brief backoff
+                import time as _t
+                _t.sleep(1.5 * attempts)
+            finally:
+                # Always cleanup
+                try:
+                    if page:
+                        page.close()
+                except Exception:
+                    pass
+                try:
+                    if ctx:
+                        ctx.close()
+                except Exception:
+                    pass
+
+        # If we get here, all attempts failed
+        self.logger.warning(f"Playwright error {url}: {last_err}")
+        return None
+
 
     def _get_page_content(self, url: str, cfg: "ScrapingConfig") -> Optional[str]:
         mode = (cfg.scraping_mode or "requests").lower()
@@ -478,10 +603,10 @@ class PropertyScraper:
 
     # --- Listing detail parse -------------------------------------
     def _parse_listing(self, html: str, url: str, cfg) -> Optional[dict]:
-        """Parse a Lamudi listing page into a dict. Best-effort + JSON-LD fallback."""
+        """Parse a Lamudi listing page into a dict. DOM first, then JSON-LD fallback."""
         soup = BeautifulSoup(html or "", "lxml")
 
-        # --- tiny local helpers (avoid external deps)
+        # ---------- tiny local helpers ----------
         def _norm_txt(x):
             return (x or "").replace("\u00a0", " ").strip()
 
@@ -508,11 +633,17 @@ class PropertyScraper:
             return None
 
         def _parse_rel_to_iso(text):
-            # Works if REL_RE is defined at module level (you have it already)
-            try:
-                m = REL_RE.search(text)
-            except NameError:
-                m = None
+            # works with "X days/weeks/months/years/hours/minutes ago"
+            REL_RE = re.compile(
+                r"(?:(?P<years>\d+)\s*year[s]?)?\s*,?\s*"
+                r"(?:(?P<months>\d+)\s*month[s]?)?\s*,?\s*"
+                r"(?:(?P<weeks>\d+)\s*week[s]?)?\s*,?\s*"
+                r"(?:(?P<days>\d+)\s*day[s]?)?\s*,?\s*"
+                r"(?:(?P<hours>\d+)\s*hour[s]?)?\s*,?\s*"
+                r"(?:(?P<minutes>\d+)\s*minute[s]?)?\s*ago",
+                flags=re.I,
+            )
+            m = REL_RE.search(text or "")
             if not m:
                 return None
             parts = {k: int(v) for k, v in m.groupdict().items() if v}
@@ -524,7 +655,6 @@ class PropertyScraper:
                 + parts.get("months", 0) * 30
                 + parts.get("years", 0) * 365
             )
-            from datetime import timedelta
             ts = datetime.now(timezone.utc) - timedelta(
                 days=days,
                 hours=parts.get("hours", 0),
@@ -541,7 +671,7 @@ class PropertyScraper:
                 try:
                     blocks.append(json.loads(raw))
                 except Exception:
-                    # salvage common multi-object blobs
+                    # salvage multiple json objects glued together
                     try:
                         parts = raw.replace("}\n{", "}\n\n{").split("\n\n")
                         for p in parts:
@@ -572,14 +702,14 @@ class PropertyScraper:
                         return node
             return None
 
-        # --- title
+        # ---------- title ----------
         title = _first_text(soup, [
             "h1[data-testid='ad-title']",
             "h1.ListingDetail__Title, h1.listing-title, h1",
             "meta[property='og:title']",
         ])
 
-        # --- price (DOM)
+        # ---------- price (DOM) ----------
         price_text = _first_text(soup, [
             "[data-testid='ad-price']",
             ".ListingDetail__Price, .price, .Price__Value",
@@ -594,7 +724,7 @@ class PropertyScraper:
             cur = "PHP" if ("₱" in price_text or "php" in price_text.lower()) else None
             price = {"raw": price_text, "currency": cur, "value": val, "period": per}
 
-        # --- area
+        # ---------- area ----------
         area = None
         full_text = soup.get_text(" ", strip=True)
         m = re.search(r"(\d[\d,\.]*)\s*(sqm|m2|m²)", full_text, flags=re.I)
@@ -604,20 +734,20 @@ class PropertyScraper:
             except Exception:
                 area = None
 
-        # --- address
+        # ---------- address ----------
         address = _first_text(soup, [
             "[data-testid='address'], .ListingDetail__Address, .address",
             "span[itemprop='address'], meta[property='og:street-address']",
             ".Breadcrumbs, nav[aria-label='breadcrumb']",
         ])
 
-        # --- description
+        # ---------- description ----------
         description = _first_text(soup, [
             "[data-testid='description'], .ListingDetail__Description, .description",
             "section[data-testid='description']",
         ])
 
-        # --- published_at (DOM first)
+        # ---------- published_at (DOM first) ----------
         published_text = _first_attr_or_text(soup, [
             "[data-testid='publish-date']",
             "time[datetime]",
@@ -625,25 +755,31 @@ class PropertyScraper:
             ".posted-date time, .posted_date time",
             ".meta time"
         ], attr="datetime")
+
         if not published_text:
             published_text = _first_text(soup, [
                 "[data-testid='publish-date']",
-                ".ListingDetail__Meta, .posted-date, .posted_date, .meta"
+                ".ListingDetail__Meta, .posted-date, .posted_date, .meta",
+                ".date",   # <-- add this line
             ])
 
-        published_at = None
-        if published_text:
-            if re.search(r"\d{4}-\d{2}-\d{2}", published_text):
-                try:
-                    published_at = dtparse.parse(published_text).astimezone(timezone.utc).isoformat()
-                except Exception:
-                    published_at = None
-            else:
-                published_at = _parse_rel_to_iso(published_text)
 
-        # --- JSON-LD fallback (fills missing published_*)
+        published_at = None
+        if published_text and not published_at:
+            # try to extract the leading date token
+            m = re.search(r"(\d{1,2}\s+[A-Za-z]{3,}\s+\d{4})", published_text)
+            if m:
+                try:
+                    dt = dtparse.parse(m.group(1), dayfirst=True).astimezone(timezone.utc)
+                    published_at = dt.isoformat()
+                except Exception:
+                    pass
+
+        # ---------- JSON-LD fallback (dates, type, price if missing) ----------
+        blocks = _jsonld_blocks(soup)
+
+        # published_* via JSON-LD if still missing
         if not published_text:
-            blocks = _jsonld_blocks(soup)
             node = _find_first(blocks, "Offer", "Product", "NewsArticle", "Article", "CreativeWork") or {}
             for key in ("datePublished", "datePosted", "dateCreated", "uploadDate", "pubDate"):
                 v = node.get(key)
@@ -655,18 +791,31 @@ class PropertyScraper:
                     except Exception:
                         pass
 
-        # --- property type (best effort)
+        # property_type
         property_type = None
-        try:
-            blocks = blocks if 'blocks' in locals() else _jsonld_blocks(soup)
-            product = _find_first(blocks, "Product", "Offer", "RealEstateAgent") or {}
-            property_type = product.get("category") or product.get("@type")
-        except Exception:
-            pass
-        if not property_type:
-            if re.search(r"\boffice|serviced office|commercial\b", full_text, re.I):
-                property_type = "Offices"
+        product = _find_first(blocks, "Product", "Offer", "RealEstateAgent") or {}
+        property_type = product.get("category") or product.get("@type")
+        if not property_type and re.search(r"\boffice|serviced office|commercial\b", full_text, re.I):
+            property_type = "Offices"
 
+        # price via JSON-LD if DOM missing
+        if (not price) or (price and price.get("value") is None):
+            offer = _find_first(blocks, "Offer") or {}
+            jd_price = offer.get("price") or (offer.get("offers") or {}).get("price") if isinstance(offer.get("offers"), dict) else offer.get("price")
+            jd_currency = offer.get("priceCurrency") or (offer.get("offers") or {}).get("priceCurrency") if isinstance(offer.get("offers"), dict) else offer.get("priceCurrency")
+            if jd_price:
+                try:
+                    val = float(str(jd_price).replace(",", ""))
+                except Exception:
+                    val = None
+                price = {
+                    "raw": (price or {}).get("raw") or str(jd_price),
+                    "currency": (price or {}).get("currency") or jd_currency,
+                    "value": val,
+                    "period": (price or {}).get("period"),
+                }
+
+        # ---------- final payload ----------
         return {
             "url": url,
             "title": title,
@@ -676,70 +825,82 @@ class PropertyScraper:
             "price": price,
             "area": area,
             "published_at_text": published_text,
-            "published_at": published_at, # ISO8601 or None
+            "published_at": published_at,
             "scraped_at": datetime.now(timezone.utc).isoformat(),
         }
 
 
 
     # --- Details runner --------------------------------------------
-    def detail_extraction_stage(self, urls: Optional[List[str]], cfg: "ScrapingConfig") -> int:
-        """
-        Read each URL, parse a listing, and write a JSONL of dict rows.
-        _parse_listing() must return either a dict or None.
-        """
-        # If urls wasn't passed, read from the staged urls file.
-        if urls is None:
-            urls_file = self.dirs["staged"] / f"{cfg.portal_name}_urls.jsonl"
-            if not urls_file.exists():
-                raise FileNotFoundError(f"Not found: {urls_file}")
-            urls = []
-            with jsonlines.open(urls_file, "r") as r:
-                for row in r:
-                    if row and row.get("url"):
-                        urls.append(row["url"])
+    def detail_extraction_stage(self, urls: list[str], cfg) -> int:
+        """Fetch each URL, parse details, write staged listings.jsonl, and log failures."""
 
         out_file = self.dirs["staged"] / f"{cfg.portal_name}_listings.jsonl"
+        fail_file = self.dirs["staged"] / f"{cfg.portal_name}_failures.jsonl"
 
-        ok = fail = 0
+        ok = 0
+        fails = []
+
+        self.logger.info(f"Starting detail extraction for {cfg.portal_name} with {len(urls)} URLs")
+
         with jsonlines.open(out_file, "w") as w:
-            self.logger.info("Starting detail extraction for %s with %d URLs", cfg.portal_name, len(urls))
             for i, u in enumerate(urls, 1):
-                self.logger.info("[%d/%d] detail -> %s", i, len(urls), u)
-
-                html = self._get_page_content(u, cfg)
-                if not html:
-                    fail += 1
-                    continue
-
+                self.logger.info(f"[{i}/{len(urls)}] detail -> {u}")
                 try:
+                    html = self._get_page_content(u, cfg)
+                    if not html:
+                        fails.append({"url": u, "reason": "no_html"})
+                        self.logger.warning(f"No HTML fetched, skipping: {u}")
+                        continue
+
                     listing = self._parse_listing(html, u, cfg)
-
                     if not listing:
-                        fail += 1
+                        fails.append({"url": u, "reason": "parse_returned_none"})
+                        self.logger.warning(f"Parse returned None, skipping: {u}")
                         continue
 
-                    # If someone returns a dataclass by mistake, convert once.
-                    from dataclasses import is_dataclass, asdict as dc_asdict
-                    if is_dataclass(listing):
-                        listing = dc_asdict(listing)
-
-                    if not isinstance(listing, dict):
-                        self.logger.warning("Parse returned non-dict type: %r", type(listing))
-                        fail += 1
+                    # hard guards so we know WHY we skipped
+                    if not listing.get("title"):
+                        fails.append({"url": u, "reason": "missing_title"})
+                        self.logger.warning(f"Missing title, skipping: {u}")
                         continue
+
+                    # If you require address/price etc., add more required-key checks here:
+                    # for req in ("address", "price"):
+                    #     if not listing.get(req):
+                    #         fails.append({"url": u, "reason": f"missing_{req}"})
+                    #         self.logger.warning(f"Missing {req}, skipping: {u}")
+                    #         break
+                    # else:
+                    #     w.write(listing); ok += 1; continue
 
                     w.write(listing)
                     ok += 1
 
                 except Exception as e:
-                    self.logger.exception("Parse error %s: %s", u, e)
-                    fail += 1
+                    # include exception name + message for root-cause analysis
+                    fails.append({
+                        "url": u,
+                        "reason": f"exception:{type(e).__name__}",
+                        "detail": str(e)[:1000],
+                    })
+                    # log full traceback in console/log file
+                    self.logger.warning(f"Parse error {u}: {e}", exc_info=True)
 
-                time.sleep(cfg.rate_limit_delay)
+        # write failures to a separate JSONL for inspection
+        if fails:
+            with jsonlines.open(fail_file, "w") as fw:
+                for row in fails:
+                    row["logged_at"] = datetime.now(timezone.utc).isoformat()
+                    fw.write(row)
 
-        self.logger.info("Details done %s: %d rows (fail %d)", cfg.portal_name, ok, fail)
+        self.logger.info(f"Details done {cfg.portal_name}: {ok} rows (fail {len(fails)})")
+        if fails:
+            self.logger.info(f"Failure log written: {fail_file}")
+        self.logger.info(f"✅ Details complete: {ok} listings")
+        self.logger.info(f"Wrote: {out_file}")
         return ok
+
 
     # --- Cleanup ---------------------------------------------------
     def __del__(self):
