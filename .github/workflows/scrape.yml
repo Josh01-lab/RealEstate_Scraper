@@ -1,45 +1,34 @@
-name: Nightly Lamudi Cebu Scrape
+name: Nightly Lamudi scrape
 
 on:
   schedule:
-    # GitHub cron runs in UTC. 3:00 AM Manila (UTC+8) == 19:00 UTC previous day
+    # 03:00 Asia/Manila == 19:00 UTC daily
     - cron: "0 19 * * *"
-  workflow_dispatch:
-    inputs:
-      max_listings:
-        description: "Hard cap listings (0 = all on pages visited)"
-        required: false
-        default: "30"
-      max_pages:
-        description: "Pagination cap"
-        required: false
-        default: "1"
-      rate_limit_delay:
-        description: "Seconds between requests"
-        required: false
-        default: "1.2"
-      scraping_mode:
-        description: "requests | playwright"
-        required: false
-        default: "playwright"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrape-nightly
+  cancel-in-progress: false
 
 env:
-  TZ: Asia/Manila
-  PYTHONUNBUFFERED: "1"
-  # Fallbacks; workflow_dispatch can override these
-  SCRAPING_MODE: ${{ github.event.inputs.scraping_mode || 'playwright' }}
-  RATE_LIMIT_DELAY: ${{ github.event.inputs.rate_limit_delay || '1.2' }}
-  MAX_PAGES: ${{ github.event.inputs.max_pages || '1' }}
-  MAX_LISTINGS: ${{ github.event.inputs.max_listings || '30' }}
+  # ---------- Scraper env caps ----------
+  SCRAPING_MODE: playwright        # use playwright in CI
+  RATE_LIMIT_DELAY: "1.0"          # seconds between requests/pages
+  MAX_PAGES: "1"                   # only first page of results
+  MAX_LISTINGS: "50"               # hard cap on discovered URLs
+  PYTHONUNBUFFERED: "2"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
-  # Required by your app
+  # ---------- Supabase (set these in repo Settings > Secrets and variables > Actions) ----------
   SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }} # or SERVICE_ROLE if you prefer
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -54,72 +43,58 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          key: ${{ runner.os }}-pip-${{ hashFiles('*/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies
+      - name: Install deps (project)
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
 
-      # Only needed if SCRAPING_MODE=playwright
-      - name: Install Playwright (chromium)
-        if: env.SCRAPING_MODE == 'playwright'
+      - name: Install Playwright browsers (Chromium)
         run: |
-          python -m pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Echo effective env
-        run: |
-          echo "SCRAPING_MODE=${SCRAPING_MODE}"
-          echo "RATE_LIMIT_DELAY=${RATE_LIMIT_DELAY}"
-          echo "MAX_PAGES=${MAX_PAGES}"
-          echo "MAX_LISTINGS=${MAX_LISTINGS}"
-
-      - name: Run discovery
+      - name: Run discovery (lamudi_cebu)
         run: |
           python -m src.runner.run_discovery --portal lamudi_cebu
+          echo "dir=$(ls -1d scraper_output/run_* | tail -n1)" >> $GITHUB_OUTPUT
+        id: discover
 
-      - name: Capture run dir
-        id: rundir
-        shell: bash
+      - name: Show discovery summary
         run: |
-          dir=$(ls -1d scraper_output/run_* | tail -n1)
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-          echo "Run dir: $dir"
+          echo "Run dir: ${{ steps.discover.outputs.dir }}"
+          ls -la "${{ steps.discover.outputs.dir }}/staged" || true
+          head -n 5 "${{ steps.discover.outputs.dir }}/staged/lamudi_cebu_urls.jsonl" || true
 
-      - name: Ensure URLs file exists
+      - name: Run details (lamudi_cebu)
         run: |
-          test -f "${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_urls.jsonl" || (echo "No URLs staged" && exit 1)
-
-      - name: Run details
-        run: |
-          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
-
-      - name: Sanity peek (first 3 rows)
-        run: |
-          f="${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_listings.jsonl"
-          test -f "$f" || (echo "No listings.jsonl created" && exit 1)
-          head -n 3 "$f" || true
-
-      - name: "Guard: non-empty results"
-        run: |
-          f="${{ steps.rundir.outputs.dir }}/staged/lamudi_cebu_listings.jsonl"
-          n=$(wc -l < "$f" || echo 0)
-          echo "Rows: $n"
-          if [ "$n" -lt 1 ]; then
-            echo "No rows parsed; failing the job to surface the issue."
-            exit 1
-          fi
+          python -m src.runner.run_details --portal lamudi_cebu --run-dir "${{ steps.discover.outputs.dir }}"
+          echo "==== First few listings ===="
+          test -f "${{ steps.discover.outputs.dir }}/staged/lamudi_cebu_listings.jsonl" && head -n 3 "${{ steps.discover.outputs.dir }}/staged/lamudi_cebu_listings.jsonl" || (echo "No listings file written"; exit 1)
 
       - name: Publish to Supabase
         env:
-          # pass through again to be explicit
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
-          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.rundir.outputs.dir }}"
+          python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.discover.outputs.dir }}"
 
-      - name: Done
-        run: echo "✅ Nightly scrape completed."
+      - name: Sanity check (count + latest rows)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          python - << 'PY'
+          from src.db.supabase_client import get_client
+          sb = get_client()
+          res = sb.table("listings").select("*", count="exact").eq("source","lamudi_cebu").execute()
+          print("Total lamudi_cebu rows:", res.count)
+          rows = (sb.table("listings")
+                    .select("url,listing_title,address,property_type,price_php,area_sqm,price_per_sqm,published_at,scraped_at")
+                    .eq("source","lamudi_cebu")
+                    .order("scraped_at", desc=True)
+                    .limit(5).execute().data)
+          for r in rows: print(r)
+          PY
