@@ -1,255 +1,329 @@
-# src/dashboard/app.py
-import argparse
-import sqlite3
-from pathlib import Path
-import json as _json
-import re
-import numpy as np
-import pandas as pd
-import streamlit as st
 import os
+import math
+from datetime import datetime, timedelta, timezone, date
+
 import pandas as pd
-import numpy as np
 import streamlit as st
-from sqlalchemy import create_engine
-from src.metrics.market_metrics import average_days_on_market, ppsqm_growth
 
-engine = create_engine(st.secrets["DATABASE_URL"])
-
-
-# ---------- config ----------
-parser = argparse.ArgumentParser(add_help=False)
-parser.add_argument("--db", default="data/db/central.db")  # <- change if needed
-args, _ = parser.parse_known_args()
-DB_PATH = args.db
-
-st.set_page_config(page_title="Cebu Commercial Rental Market Intelligence", layout="wide")
-
-
-# ---------- helpers ----------
-def _coerce_jsonish(x):
-    """Return dict if x is a dict or JSON-string; else None."""
-    if isinstance(x, dict):
-        return x
-    if isinstance(x, str):
-        s = x.strip()
-        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
-            try:
-                return _json.loads(s)
-            except Exception:
-                pass
-    return None
-
-
-@st.cache_data(show_spinner=False)
-def load_data(db_path: str, table: str = "listings") -> pd.DataFrame:
-    if not Path(db_path).exists():
-        raise FileNotFoundError(f"SQLite database not found: {db_path}")
-
-    with sqlite3.connect(db_path) as con:
-        df = pd.read_sql_query(f"SELECT * FROM {table}", con)
-
-    # ---------- PRICE ----------
-    if "price_php" not in df.columns:
-        price_val = None
-        if {"price_value", "price_currency"}.issubset(df.columns):
-            price_val = np.where(df["price_currency"].eq("PHP"), df["price_value"], np.nan)
-        elif "price" in df.columns:
-            p = df["price"].apply(_coerce_jsonish)
-            price_val = p.apply(
-                lambda d: d.get("value") if isinstance(d, dict) and d.get("currency") in (None, "PHP") else np.nan
-            )
-            mask_text = p.isna() & df["price"].notna()
-            if mask_text.any():
-                def _num_from_text(s):
-                    try:
-                        digits = re.sub(r"[^\d.]", "", str(s).replace(",", ""))
-                        return float(digits) if digits else np.nan
-                    except Exception:
-                        return np.nan
-                price_val = pd.Series(price_val, copy=True)
-                price_val.loc[mask_text] = df.loc[mask_text, "price"].apply(_num_from_text)
-        elif "price_value" in df.columns:
-            price_val = df["price_value"]
-
-        df["price_php"] = pd.to_numeric(price_val, errors="coerce") if price_val is not None else np.nan
-
-    # ---------- TITLE ----------
-    if "listing_title" not in df.columns:
-        df["listing_title"] = df["title"] if "title" in df.columns else ""
-
-    # ---------- AREA ----------
-    if "area_sqm" not in df.columns:
-        area = pd.Series(np.nan, index=df.index, dtype="float64")
-        if "area" in df.columns:
-            ajson = df["area"].apply(_coerce_jsonish)
-            has_dict = ajson.apply(lambda d: isinstance(d, dict) and d.get("sqm") is not None)
-            area.loc[has_dict] = pd.to_numeric(ajson[has_dict].apply(lambda d: d.get("sqm")), errors="coerce")
-            mask_text = (~has_dict) & df["area"].notna()
-            if mask_text.any():
-                def _sqm_from_text(s):
-                    s = str(s)
-                    m = re.search(r"(\d+(?:[\.,]\d+)?)\s*(?:m²|m2|sqm|sq\.?\s*m(?:eters?)?)", s, flags=re.I)
-                    if m:
-                        try: return float(m.group(1).replace(",", ""))
-                        except Exception: return np.nan
-                    ft = re.search(r"(\d+(?:[\.,]\d+)?)\s*(?:sq\.?\s*ft|ft²|ft2|square\s*feet)", s, flags=re.I)
-                    if ft:
-                        try: return round(float(ft.group(1).replace(",", "")) * 0.092903, 2)
-                        except Exception: return np.nan
-                    return np.nan
-                area.loc[mask_text] = pd.to_numeric(df.loc[mask_text, "area"].apply(_sqm_from_text), errors="coerce")
-
-        if area.isna().all() and "description" in df.columns:
-            area_from_desc = df["description"].apply(
-                lambda s: np.nan if pd.isna(s) else
-                (lambda m: float(m.group(1)) if m else np.nan)(
-                    re.search(r"(\d+(?:\.\d+)?)\s*(?:sqm|m²|m2|sq\.?\s*m)", str(s), flags=re.I)
-                )
-            )
-            area = area.fillna(pd.to_numeric(area_from_desc, errors="coerce"))
-
-        df["area_sqm"] = pd.to_numeric(area, errors="coerce")
-    else:
-        df["area_sqm"] = pd.to_numeric(df["area_sqm"], errors="coerce")
-
-    # ---------- PROPERTY TYPE ----------
-    if "property_type" not in df.columns:
-        candidates = [c for c in df.columns if "type" in c.lower()]
-        df["property_type"] = df[candidates[0]].astype(str) if candidates else "Unknown"
-
-    # ---------- ADDRESS ----------
-    if "address" not in df.columns:
-        df["address"] = ""
-
-    # ---------- PPSQM ----------
-    if "price_per_sqm" not in df.columns:
-        df["price_per_sqm"] = np.where(
-            (pd.to_numeric(df["price_php"], errors="coerce").notna()) &
-            (pd.to_numeric(df["area_sqm"], errors="coerce") > 0),
-            df["price_php"] / df["area_sqm"],
-            np.nan,
-        )
-
-    for col in ["price_php", "area_sqm", "price_per_sqm"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    return df
-
-
-# ---------- safe load & UI ----------
-
-# Load once
-df_all = load_data(DB_PATH)
-
-# ---------- STRICT FILTER: only keep complete rows for display ----------
-required_cols = ["listing_title", "price_php", "area_sqm", "price_per_sqm", "address"]
-
-# Ensure required columns exist (create empty if missing)
-for col in required_cols:
-    if col not in df_all.columns:
-        df_all[col] = np.nan
-
-# Normalize None -> NaN uniformly
-df_all = df_all.where(pd.notnull(df_all), np.nan)
-
-# Force numeric for metrics/filters
-df_all["price_php"] = pd.to_numeric(df_all["price_php"], errors="coerce")
-df_all["area_sqm"]  = pd.to_numeric(df_all["area_sqm"],  errors="coerce")
-df_all["price_per_sqm"] = pd.to_numeric(df_all["price_per_sqm"], errors="coerce")
-
-# Build a cleaned view for the table (don’t mutate df_all)
-df_view = df_all.copy()
-
-# Drop rows with any missing required field
-df_view = df_view.dropna(subset=required_cols)
-
-# Also drop rows with non-positive area or price
-df_view = df_view[(df_view["area_sqm"] > 0) & (df_view["price_php"] > 0)]
-
-# Recompute price_per_sqm (defensive)
-df_view["price_per_sqm"] = df_view["price_php"] / df_view["area_sqm"]
-
-# Replace ±inf safely without FutureWarning
-# Replace +/-inf only in numeric columns, then drop bad PPSQM rows
-num_cols = df_view.select_dtypes(include=[np.number]).columns
-df_view[num_cols] = df_view[num_cols].replace([np.inf, -np.inf], np.nan)
-df_view = df_view.dropna(subset=["price_per_sqm"])
-
-st.subheader("Market Trends")
-
-# 1) Average Days on Market
+# If you already have supabase client helpers in your repo, prefer importing them:
+#   from src.db.supabase_client import get_client
+# Otherwise use the official client below.
 try:
-    dom_df = average_days_on_market()
-    if not dom_df.empty:
-        colA, colB, colC = st.columns(3)
-        colA.metric("Avg Days on Market", f"{float(dom_df['avg_dom_days'].iloc[0]):.1f}")
-        colB.metric("Median Days on Market", f"{float(dom_df['median_dom_days'].iloc[0]):.1f}")
-        colC.metric("Listings Count (for DOM)", f"{int(dom_df['listings_count'].iloc[0]):,}")
-    else:
-        st.info("No DOM data yet. Keep scraping daily to build history.")
-except Exception as e:
-    st.warning(f"DOM metric error: {e}")
+    from src.db.supabase_client import get_client as _get_client  # your existing helper
+    def get_client():
+        return _get_client()
+except Exception:
+    # Fallback to official client (make sure it's in requirements.txt)
+    from supabase import create_client, Client  # type: ignore
 
-# 2) Price per SqM Growth (7, 14, 21 days)
-tabs = st.tabs(["7-day Growth", "14-day Growth", "21-day Growth"])
-for tab, win in zip(tabs, [7, 14, 21]):
-    with tab:
-        try:
-            gdf = ppsqm_growth(window_days=win)
-            if gdf.empty or gdf["growth_pct"].dropna().empty:
-                st.info("Not enough history yet for growth calculation.")
-            else:
-                st.line_chart(
-                    gdf.set_index("as_of_date")[["avg_ppsqm", "growth_pct"]],
-                    use_container_width=True
-                )
-        except Exception as e:
-            st.warning(f"Growth metric error: {e}")
+    def get_client() -> "Client":
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_ANON_KEY")
+        if not url or not key:
+            raise RuntimeError(
+                "Missing SUPABASE_URL / SUPABASE_ANON_KEY. "
+                "Set them as environment variables."
+            )
+        return create_client(url, key)
 
+TABLE = os.getenv("LISTINGS_TABLE", "listings")
 
-# -----------------------------
-# Now use df_view for filters + table
-# -----------------------------
-# Sidebar filters on df_view
-with st.sidebar:
-    st.header("Filters")
-    types = sorted([t for t in df_view["property_type"].dropna().unique().tolist() if t != ""])
-    selected_types = st.multiselect("Property Type", options=types, default=types)
+st.set_page_config(
+    page_title="Real Estate Listings",
+    page_icon="",
+    layout="wide",
+)
 
-    price_series = df_view["price_php"].dropna()
-    if not price_series.empty:
-        pmin, pmax = int(price_series.min()), int(price_series.max())
-        slider_min, slider_max = st.slider(
-            "Price (PHP per month)",
-            min_value=pmin, max_value=pmax,
-            value=(pmin, pmax),
-            step=max(1, (pmax - pmin) // 100),
+# ------------------------ Utilities ------------------------ #
+
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_sources() -> list[str]:
+    sb = get_client()
+    try:
+        rows = (
+            sb.table(TABLE)
+              .select("source")
+              .neq("source", None)
+              .execute()
+              .data
         )
-    else:
-        slider_min, slider_max = 0, 0
-        st.info("No price data available to build a slider.")
+        return sorted({r["source"] for r in rows if r.get("source")})
+    except Exception:
+        return []
 
-    address_query = st.text_input("Search Address / Neighborhood").strip()
+def _safe_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
 
-# Apply filters
-df_filtered = df_view.copy()
-if selected_types:
-    df_filtered = df_filtered[df_filtered["property_type"].isin(selected_types)]
-if slider_max > slider_min:
-    df_filtered = df_filtered[df_filtered["price_php"].between(slider_min, slider_max, inclusive="both")]
-if address_query:
-    df_filtered = df_filtered[df_filtered["address"].fillna("").str.contains(address_query, case=False, na=False)]
+@st.cache_data(show_spinner=True, ttl=60)
+def query_listings(
+    sources: list[str],
+    q_address: str | None,
+    q_title: str | None,
+    prop_types: list[str],
+    price_min: float | None,
+    price_max: float | None,
+    area_min: float | None,
+    area_max: float | None,
+    scraped_from: date | None,
+    scraped_to: date | None,
+    published_from: date | None,
+    published_to: date | None,
+    page: int,
+    page_size: int,
+    order_by: str,
+    order_desc: bool,
+) -> tuple[pd.DataFrame, int]:
+    sb = get_client()
+    rq = sb.table(TABLE).select(
+        "url,listing_title,address,property_type,price_php,area_sqm,price_per_sqm,published_at,scraped_at,source"
+    , count="exact")
 
-# Table
-display_cols = ["listing_title", "price_php", "area_sqm", "price_per_sqm", "address"]
-for c in display_cols:
-    if c not in df_filtered.columns:
-        df_filtered[c] = np.nan
+    # Filters
+    if sources:
+        # Supabase: use 'in' with a list
+        rq = rq.in_("source", sources)
+    if q_address:
+        rq = rq.ilike("address", f"%{q_address}%")
+    if q_title:
+        rq = rq.ilike("listing_title", f"%{q_title}%")
+    if prop_types:
+        rq = rq.in_("property_type", prop_types)
+    if price_min is not None:
+        rq = rq.gte("price_php", price_min)
+    if price_max is not None:
+        rq = rq.lte("price_php", price_max)
+    if area_min is not None:
+        rq = rq.gte("area_sqm", area_min)
+    if area_max is not None:
+        rq = rq.lte("area_sqm", area_max)
+    if scraped_from:
+        rq = rq.gte("scraped_at", datetime.combine(scraped_from, datetime.min.time()).isoformat() + "Z")
+    if scraped_to:
+        # inclusive to end of day
+        end = datetime.combine(scraped_to, datetime.max.time()).replace(microsecond=0).isoformat() + "Z"
+        rq = rq.lte("scraped_at", end)
+    if published_from:
+        rq = rq.gte("published_at", datetime.combine(published_from, datetime.min.time()).isoformat() + "Z")
+    if published_to:
+        end = datetime.combine(published_to, datetime.max.time()).replace(microsecond=0).isoformat() + "Z"
+        rq = rq.lte("published_at", end)
 
-st.dataframe(
-    df_filtered[display_cols].sort_values(by=["price_php"], ascending=True, na_position="last"),
-    use_container_width=True,
+    # Sort
+    rq = rq.order(order_by, desc=order_desc, nullsfirst=False)
+
+    # Pagination
+    start = page * page_size
+    end = start + page_size - 1
+    rq = rq.range(start, end)
+
+    res = rq.execute()
+    rows = res.data or []
+    total = res.count or 0
+
+    # Normalize to DataFrame
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        # Ensure numeric dtype
+        for col in ["price_php", "area_sqm", "price_per_sqm"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Compute price_per_sqm if missing
+        missing_pps = df["price_per_sqm"].isna() & df["price_php"].notna() & df["area_sqm"].notna() & (df["area_sqm"] > 0)
+        df.loc[missing_pps, "price_per_sqm"] = df.loc[missing_pps, "price_php"] / df.loc[missing_pps, "area_sqm"]
+
+        # Parse datetimes
+        for col in ["published_at", "scraped_at"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
+    return df, int(total)
+
+@st.cache_data(show_spinner=False, ttl=120)
+def top_kpi(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {"count": 0, "avg_pps": None, "median_price": None}
+    return {
+        "count": len(df),
+        "avg_pps": float(df["price_per_sqm"].dropna().mean()) if "price_per_sqm" in df else None,
+        "median_price": float(df["price_php"].dropna().median()) if "price_php" in df else None,
+    }
+
+def make_csv(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8")
+
+
+# ------------------------ Sidebar Filters ------------------------ #
+st.sidebar.header("Filters")
+
+all_sources = fetch_sources()
+src_sel = st.sidebar.multiselect("Source", all_sources, default=all_sources[:1] if all_sources else [])
+
+col1, col2 = st.sidebar.columns(2)
+with col1:
+    price_min = st.number_input("Min Price (PHP)", min_value=0, value=0, step=1000, format="%d")
+with col2:
+    price_max = st.number_input("Max Price (PHP)", min_value=0, value=0, step=1000, format="%d")
+price_min = price_min or None
+price_max = price_max or None
+
+col3, col4 = st.sidebar.columns(2)
+with col3:
+    area_min = st.number_input("Min Area (sqm)", min_value=0, value=0, step=1, format="%d")
+with col4:
+    area_max = st.number_input("Max Area (sqm)", min_value=0, value=0, step=1, format="%d")
+area_min = area_min or None
+area_max = area_max or None
+
+addr_q = st.sidebar.text_input("Search Address contains…")
+title_q = st.sidebar.text_input("Search Title contains…")
+
+today = date.today()
+scr_from, scr_to = st.sidebar.date_input(
+    "Scraped date range",
+    value=(today - timedelta(days=7), today),
+)
+pub_from, pub_to = st.sidebar.date_input(
+    "Published date range (optional)",
+    value=(None, None),
+)
+
+# property types (pull from Supabase quickly via a small sample)
+@st.cache_data(show_spinner=False, ttl=300)
+def fetch_property_types() -> list[str]:
+    sb = get_client()
+    try:
+        rows = (
+            sb.table(TABLE)
+              .select("property_type")
+              .neq("property_type", None)
+              .limit(1000)
+              .execute()
+              .data
+        )
+        return sorted({r["property_type"] for r in rows if r.get("property_type")})
+    except Exception:
+        return []
+
+ptype_opts = fetch_property_types()
+ptype_sel = st.sidebar.multiselect("Property Type", ptype_opts, default=[])
+
+# Sorting & pagination
+st.sidebar.header("View")
+order_by = st.sidebar.selectbox(
+    "Sort by",
+    options=["scraped_at", "published_at", "price_php", "price_per_sqm", "area_sqm", "listing_title"],
+    index=0,
+)
+order_desc = st.sidebar.toggle("Descending", value=True)
+page_size = st.sidebar.selectbox("Rows per page", options=[25, 50, 100], index=0)
+
+# ------------------------ Query & Results ------------------------ #
+page = st.session_state.get("page", 0)
+# reset page on any filter change by keying state
+if "prev_filters" not in st.session_state:
+    st.session_state.prev_filters = None
+current_filters = (tuple(src_sel), addr_q, title_q, tuple(ptype_sel),
+                   price_min, price_max, area_min, area_max, scr_from, scr_to, pub_from, pub_to, order_by, order_desc, page_size)
+if st.session_state.prev_filters != current_filters:
+    page = 0
+st.session_state.prev_filters = current_filters
+
+df, total = query_listings(
+    sources=src_sel,
+    q_address=addr_q or None,
+    q_title=title_q or None,
+    prop_types=ptype_sel,
+    price_min=_safe_float(price_min),
+    price_max=_safe_float(price_max),
+    area_min=_safe_float(area_min),
+    area_max=_safe_float(area_max),
+    scraped_from=scr_from if isinstance(scr_from, date) else None,
+    scraped_to=scr_to if isinstance(scr_to, date) else None,
+    published_from=pub_from if isinstance(pub_from, date) else None,
+    published_to=pub_to if isinstance(pub_to, date) else None,
+    page=page,
+    page_size=page_size,
+    order_by=order_by,
+    order_desc=order_desc,
+)
+
+# KPIs
+kpis = top_kpi(df)
+k1, k2, k3 = st.columns(3)
+k1.metric("Listings (page)", f"{len(df):,}")
+k2.metric("Avg Price / sqm", f"₱{kpis['avg_pps']:,.0f}" if kpis["avg_pps"] else "—")
+k3.metric("Median Price", f"₱{kpis['median_price']:,.0f}" if kpis["median_price"] else "—")
+
+# Charts (simple & fast)
+if not df.empty:
+    c1, c2 = st.columns(2)
+    with c1:
+        st.write("**Count by scraped date**")
+        tmp = df.copy()
+        tmp["scraped_date"] = pd.to_datetime(tmp["scraped_at"]).dt.date
+        chart = (
+            tmp.groupby("scraped_date")["url"].count()
+            .rename("count")
+            .reset_index()
+        )
+        st.bar_chart(chart, x="scraped_date", y="count")
+    with c2:
+        st.write("**Avg price/sqm by property type**")
+        tmp = df.copy()
+        if "property_type" in tmp.columns:
+            chart2 = (
+                tmp.groupby("property_type")["price_per_sqm"]
+                .mean()
+                .fillna(0)
+                .rename("avg_price_per_sqm")
+                .reset_index()
+            )
+            st.bar_chart(chart2, x="property_type", y="avg_price_per_sqm")
+
+# Data table
+st.write("### Listings")
+if df.empty:
+    st.info("No results for the current filters.")
+else:
+    # Make URL clickable in Streamlit dataframe
+    show = df.copy()
+    show["price_php"] = show["price_php"].map(lambda v: f"₱{v:,.0f}" if pd.notna(v) else "")
+    show["price_per_sqm"] = show["price_per_sqm"].map(lambda v: f"₱{v:,.0f}" if pd.notna(v) else "")
+    show["area_sqm"] = show["area_sqm"].map(lambda v: f"{v:,.0f} sqm" if pd.notna(v) else "")
+    show["scraped_at"] = show["scraped_at"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%d %H:%M UTC") if pd.api.types.is_datetime64tz_dtype(show["scraped_at"]) else show["scraped_at"]
+    if "published_at" in show.columns and pd.api.types.is_datetime64tz_dtype(show["published_at"]):
+        show["published_at"] = show["published_at"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%d")
+
+    # Move URL earlier & make it markdown
+    show.insert(0, "link", show["url"].map(lambda u: f"[open]({u})" if isinstance(u, str) else ""))
+    show = show.drop(columns=["url"])
+
+    st.dataframe(
+        show,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+# Pagination controls
+total_pages = math.ceil(total / page_size) if page_size else 1
+colp1, colp2, colp3 = st.columns([1, 2, 1])
+with colp1:
+    if st.button(" Prev", disabled=(page <= 0)):
+        page = max(0, page - 1)
+with colp2:
+    st.write(f"Page {page + 1} of {max(total_pages,1)} — {total:,} total")
+with colp3:
+    if st.button("Next", disabled=(page + 1 >= total_pages)):
+        page = min(total_pages - 1, page + 1)
+st.session_state.page = page
+
+# Export
+st.download_button(
+    "Download CSV",
+    data=make_csv(df),
+    file_name=f"listings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
 )
 
 
