@@ -1,0 +1,11 @@
+numpy
+pandas
+streamlit
+beautifulsoup4==4.12.3
+html5lib==1.1
+lxml==4.9.4 ; python_version < "3.12"   # wheels exist for 3.11 in GitHub runners
+requests>=2.32
+jsonlines==4.0.0
+python-dateutil>=2.9
+playwright==1.46.0
+
