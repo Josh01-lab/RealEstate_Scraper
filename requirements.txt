@@ -11,3 +11,4 @@ python-dateutil==2.9.0.post0
 supabase==2.5.1
 psycopg[binary,pool]==3.2.1
 python-dotenv==1.0.1
+streamlit
