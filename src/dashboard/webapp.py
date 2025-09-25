@@ -1,329 +1,181 @@
 import os
-import math
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timezone
+from typing import Optional
 
+import numpy as np
 import pandas as pd
 import streamlit as st
+from supabase import create_client
 
-# If you already have supabase client helpers in your repo, prefer importing them:
-#   from src.db.supabase_client import get_client
-# Otherwise use the official client below.
-try:
-    from src.db.supabase_client import get_client as _get_client  # your existing helper
-    def get_client():
-        return _get_client()
-except Exception:
-    # Fallback to official client (make sure it's in requirements.txt)
-    from supabase import create_client, Client  # type: ignore
+# ---------- Config ----------
+st.set_page_config(page_title="PH Office Listings", page_icon="🏢", layout="wide")
 
-    def get_client() -> "Client":
-        url = os.environ.get("SUPABASE_URL")
-        key = os.environ.get("SUPABASE_ANON_KEY")
-        if not url or not key:
-            raise RuntimeError(
-                "Missing SUPABASE_URL / SUPABASE_ANON_KEY. "
-                "Set them as environment variables."
-            )
-        return create_client(url, key)
+SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_ANON_KEY")
+SOURCE = st.secrets.get("SOURCE", "lamudi_cebu") # change or override in secrets
 
-TABLE = os.getenv("LISTINGS_TABLE", "listings")
+# ---------- Helpers ----------
+@st.cache_data(ttl=600)
+def get_client():
+    return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
-st.set_page_config(
-    page_title="Real Estate Listings",
-    page_icon="",
-    layout="wide",
-)
+def coalesce_datetime(a: Optional[str], b: Optional[str]) -> Optional[pd.Timestamp]:
+    # prefer published_at; else scraped_at
+    for v in (a, b):
+        if not v:
+            continue
+        try:
+            return pd.to_datetime(v, utc=True, errors="coerce")
+        except Exception:
+            pass
+    return None
 
-# ------------------------ Utilities ------------------------ #
-
-@st.cache_data(show_spinner=False, ttl=300)
-def fetch_sources() -> list[str]:
-    sb = get_client()
-    try:
-        rows = (
-            sb.table(TABLE)
-              .select("source")
-              .neq("source", None)
-              .execute()
-              .data
-        )
-        return sorted({r["source"] for r in rows if r.get("source")})
-    except Exception:
-        return []
-
-def _safe_float(x):
-    try:
-        return float(x)
-    except Exception:
+def extract_city(address: Optional[str]) -> Optional[str]:
+    if not address:
         return None
+    # Simple, robust heuristic: take the last token after the final comma
+    # "Cebu IT Park, Cebu" -> "Cebu"
+    parts = [p.strip() for p in address.split(",") if p.strip()]
+    return parts[-1] if parts else None
 
-@st.cache_data(show_spinner=True, ttl=60)
-def query_listings(
-    sources: list[str],
-    q_address: str | None,
-    q_title: str | None,
-    prop_types: list[str],
-    price_min: float | None,
-    price_max: float | None,
-    area_min: float | None,
-    area_max: float | None,
-    scraped_from: date | None,
-    scraped_to: date | None,
-    published_from: date | None,
-    published_to: date | None,
-    page: int,
-    page_size: int,
-    order_by: str,
-    order_desc: bool,
-) -> tuple[pd.DataFrame, int]:
+@st.cache_data(ttl=600, show_spinner="Loading listings from Supabase…")
+def load_data(limit: int = 5000) -> pd.DataFrame:
     sb = get_client()
-    rq = sb.table(TABLE).select(
-        "url,listing_title,address,property_type,price_php,area_sqm,price_per_sqm,published_at,scraped_at,source"
-    , count="exact")
-
-    # Filters
-    if sources:
-        # Supabase: use 'in' with a list
-        rq = rq.in_("source", sources)
-    if q_address:
-        rq = rq.ilike("address", f"%{q_address}%")
-    if q_title:
-        rq = rq.ilike("listing_title", f"%{q_title}%")
-    if prop_types:
-        rq = rq.in_("property_type", prop_types)
-    if price_min is not None:
-        rq = rq.gte("price_php", price_min)
-    if price_max is not None:
-        rq = rq.lte("price_php", price_max)
-    if area_min is not None:
-        rq = rq.gte("area_sqm", area_min)
-    if area_max is not None:
-        rq = rq.lte("area_sqm", area_max)
-    if scraped_from:
-        rq = rq.gte("scraped_at", datetime.combine(scraped_from, datetime.min.time()).isoformat() + "Z")
-    if scraped_to:
-        # inclusive to end of day
-        end = datetime.combine(scraped_to, datetime.max.time()).replace(microsecond=0).isoformat() + "Z"
-        rq = rq.lte("scraped_at", end)
-    if published_from:
-        rq = rq.gte("published_at", datetime.combine(published_from, datetime.min.time()).isoformat() + "Z")
-    if published_to:
-        end = datetime.combine(published_to, datetime.max.time()).replace(microsecond=0).isoformat() + "Z"
-        rq = rq.lte("published_at", end)
-
-    # Sort
-    rq = rq.order(order_by, desc=order_desc, nullsfirst=False)
-
-    # Pagination
-    start = page * page_size
-    end = start + page_size - 1
-    rq = rq.range(start, end)
-
-    res = rq.execute()
-    rows = res.data or []
-    total = res.count or 0
-
-    # Normalize to DataFrame
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        # Ensure numeric dtype
-        for col in ["price_php", "area_sqm", "price_per_sqm"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        # Compute price_per_sqm if missing
-        missing_pps = df["price_per_sqm"].isna() & df["price_php"].notna() & df["area_sqm"].notna() & (df["area_sqm"] > 0)
-        df.loc[missing_pps, "price_per_sqm"] = df.loc[missing_pps, "price_php"] / df.loc[missing_pps, "area_sqm"]
-
-        # Parse datetimes
-        for col in ["published_at", "scraped_at"]:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
-    return df, int(total)
-
-@st.cache_data(show_spinner=False, ttl=120)
-def top_kpi(df: pd.DataFrame) -> dict:
+    # Pull minimal-but-useful columns; add more if you need them in the grid
+    cols = [
+        "url", "listing_title", "address", "property_type",
+        "price_php", "area_sqm", "price_per_sqm",
+        "published_at", "published_at_text", "scraped_at", "source",
+    ]
+    resp = sb.table("listings").select(",".join(cols)).eq("source", SOURCE).limit(limit).order("scraped_at", desc=True).execute()
+    df = pd.DataFrame(resp.data or [])
     if df.empty:
-        return {"count": 0, "avg_pps": None, "median_price": None}
-    return {
-        "count": len(df),
-        "avg_pps": float(df["price_per_sqm"].dropna().mean()) if "price_per_sqm" in df else None,
-        "median_price": float(df["price_php"].dropna().median()) if "price_php" in df else None,
-    }
+        return df
 
-def make_csv(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
+    # Normalize/compute derived fields
+    df["city"] = df["address"].apply(extract_city)
+    # prefer existing price_per_sqm; compute if missing and both price + area exist
+    need_pps = df["price_per_sqm"].isna()
+    can_compute = df["price_php"].notna() & df["area_sqm"].notna() & (df["area_sqm"] > 0)
+    df.loc[need_pps & can_compute, "price_per_sqm"] = df["price_php"] / df["area_sqm"]
 
+    # Date for filter: prefer published_at else scraped_at
+    df["filter_date"] = [
+        coalesce_datetime(pa, sa) for pa, sa in zip(df.get("published_at"), df.get("scraped_at"))
+    ]
+    # For display
+    if "filter_date" in df:
+        df["filter_date_local"] = df["filter_date"].dt.tz_convert("Asia/Manila").dt.strftime("%Y-%m-%d %H:%M")
+    return df
 
-# ------------------------ Sidebar Filters ------------------------ #
-st.sidebar.header("Filters")
+def kpi(label: str, value, help_text: Optional[str] = None):
+    st.metric(label, value if value is not None else "—", help=help_text)
 
-all_sources = fetch_sources()
-src_sel = st.sidebar.multiselect("Source", all_sources, default=all_sources[:1] if all_sources else [])
+# ---------- UI: Sidebar Filters ----------
+st.title("🏢 Cebu Office Listings — Analytics")
 
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    price_min = st.number_input("Min Price (PHP)", min_value=0, value=0, step=1000, format="%d")
-with col2:
-    price_max = st.number_input("Max Price (PHP)", min_value=0, value=0, step=1000, format="%d")
-price_min = price_min or None
-price_max = price_max or None
-
-col3, col4 = st.sidebar.columns(2)
-with col3:
-    area_min = st.number_input("Min Area (sqm)", min_value=0, value=0, step=1, format="%d")
-with col4:
-    area_max = st.number_input("Max Area (sqm)", min_value=0, value=0, step=1, format="%d")
-area_min = area_min or None
-area_max = area_max or None
-
-addr_q = st.sidebar.text_input("Search Address contains…")
-title_q = st.sidebar.text_input("Search Title contains…")
-
-today = date.today()
-scr_from, scr_to = st.sidebar.date_input(
-    "Scraped date range",
-    value=(today - timedelta(days=7), today),
-)
-pub_from, pub_to = st.sidebar.date_input(
-    "Published date range (optional)",
-    value=(None, None),
-)
-
-# property types (pull from Supabase quickly via a small sample)
-@st.cache_data(show_spinner=False, ttl=300)
-def fetch_property_types() -> list[str]:
-    sb = get_client()
-    try:
-        rows = (
-            sb.table(TABLE)
-              .select("property_type")
-              .neq("property_type", None)
-              .limit(1000)
-              .execute()
-              .data
-        )
-        return sorted({r["property_type"] for r in rows if r.get("property_type")})
-    except Exception:
-        return []
-
-ptype_opts = fetch_property_types()
-ptype_sel = st.sidebar.multiselect("Property Type", ptype_opts, default=[])
-
-# Sorting & pagination
-st.sidebar.header("View")
-order_by = st.sidebar.selectbox(
-    "Sort by",
-    options=["scraped_at", "published_at", "price_php", "price_per_sqm", "area_sqm", "listing_title"],
-    index=0,
-)
-order_desc = st.sidebar.toggle("Descending", value=True)
-page_size = st.sidebar.selectbox("Rows per page", options=[25, 50, 100], index=0)
-
-# ------------------------ Query & Results ------------------------ #
-page = st.session_state.get("page", 0)
-# reset page on any filter change by keying state
-if "prev_filters" not in st.session_state:
-    st.session_state.prev_filters = None
-current_filters = (tuple(src_sel), addr_q, title_q, tuple(ptype_sel),
-                   price_min, price_max, area_min, area_max, scr_from, scr_to, pub_from, pub_to, order_by, order_desc, page_size)
-if st.session_state.prev_filters != current_filters:
-    page = 0
-st.session_state.prev_filters = current_filters
-
-df, total = query_listings(
-    sources=src_sel,
-    q_address=addr_q or None,
-    q_title=title_q or None,
-    prop_types=ptype_sel,
-    price_min=_safe_float(price_min),
-    price_max=_safe_float(price_max),
-    area_min=_safe_float(area_min),
-    area_max=_safe_float(area_max),
-    scraped_from=scr_from if isinstance(scr_from, date) else None,
-    scraped_to=scr_to if isinstance(scr_to, date) else None,
-    published_from=pub_from if isinstance(pub_from, date) else None,
-    published_to=pub_to if isinstance(pub_to, date) else None,
-    page=page,
-    page_size=page_size,
-    order_by=order_by,
-    order_desc=order_desc,
-)
-
-# KPIs
-kpis = top_kpi(df)
-k1, k2, k3 = st.columns(3)
-k1.metric("Listings (page)", f"{len(df):,}")
-k2.metric("Avg Price / sqm", f"₱{kpis['avg_pps']:,.0f}" if kpis["avg_pps"] else "—")
-k3.metric("Median Price", f"₱{kpis['median_price']:,.0f}" if kpis["median_price"] else "—")
-
-# Charts (simple & fast)
-if not df.empty:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write("**Count by scraped date**")
-        tmp = df.copy()
-        tmp["scraped_date"] = pd.to_datetime(tmp["scraped_at"]).dt.date
-        chart = (
-            tmp.groupby("scraped_date")["url"].count()
-            .rename("count")
-            .reset_index()
-        )
-        st.bar_chart(chart, x="scraped_date", y="count")
-    with c2:
-        st.write("**Avg price/sqm by property type**")
-        tmp = df.copy()
-        if "property_type" in tmp.columns:
-            chart2 = (
-                tmp.groupby("property_type")["price_per_sqm"]
-                .mean()
-                .fillna(0)
-                .rename("avg_price_per_sqm")
-                .reset_index()
-            )
-            st.bar_chart(chart2, x="property_type", y="avg_price_per_sqm")
-
-# Data table
-st.write("### Listings")
+df = load_data()
 if df.empty:
-    st.info("No results for the current filters.")
-else:
-    # Make URL clickable in Streamlit dataframe
-    show = df.copy()
-    show["price_php"] = show["price_php"].map(lambda v: f"₱{v:,.0f}" if pd.notna(v) else "")
-    show["price_per_sqm"] = show["price_per_sqm"].map(lambda v: f"₱{v:,.0f}" if pd.notna(v) else "")
-    show["area_sqm"] = show["area_sqm"].map(lambda v: f"{v:,.0f} sqm" if pd.notna(v) else "")
-    show["scraped_at"] = show["scraped_at"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%d %H:%M UTC") if pd.api.types.is_datetime64tz_dtype(show["scraped_at"]) else show["scraped_at"]
-    if "published_at" in show.columns and pd.api.types.is_datetime64tz_dtype(show["published_at"]):
-        show["published_at"] = show["published_at"].dt.tz_convert("UTC").dt.strftime("%Y-%m-%d")
+    st.info("No data yet. Scrape needs to publish rows to Supabase.")
+    st.stop()
 
-    # Move URL earlier & make it markdown
-    show.insert(0, "link", show["url"].map(lambda u: f"[open]({u})" if isinstance(u, str) else ""))
-    show = show.drop(columns=["url"])
+with st.sidebar:
+    st.header("Filters")
 
-    st.dataframe(
-        show,
-        use_container_width=True,
-        hide_index=True,
+    # Cities from data, sorted; allow multi-select
+    cities = sorted([c for c in df["city"].dropna().unique()])
+    city_sel = st.multiselect("City", options=cities, default=cities)
+
+    # Price/sqm slider (robust to NaNs/outliers)
+    pps = df["price_per_sqm"].dropna()
+    if pps.empty:
+        min_pps, max_pps = 0.0, 0.0
+    else:
+        # Clip to sane range using percentiles to avoid extreme outliers breaking UI
+        lo = float(np.nanpercentile(pps, 1))
+        hi = float(np.nanpercentile(pps, 99))
+        min_pps, max_pps = st.slider("Price per sqm (PHP)", min_value=0.0, max_value=max(hi, lo), value=(lo, hi), step=50.0)
+
+    # Date range (published_at preferred; else scraped_at)
+    if df["filter_date"].notna().any():
+        dmin = pd.to_datetime(df["filter_date"].min()).date()
+        dmax = pd.to_datetime(df["filter_date"].max()).date()
+        d_from, d_to = st.date_input("Date range", value=(dmin, dmax), min_value=dmin, max_value=dmax)
+    else:
+        d_from = d_to = None
+        st.caption("No date metadata present to filter by.")
+
+    # Free text search by title/address (optional)
+    q = st.text_input("Search text (title/address)", "")
+
+# ---------- Apply Filters ----------
+flt = df.copy()
+
+if city_sel:
+    flt = flt[flt["city"].isin(city_sel)]
+
+if "price_per_sqm" in flt and len(flt):
+    flt = flt[
+        flt["price_per_sqm"].fillna(-1).between(
+            min_pps if 'min_pps' in locals() else -1,
+            max_pps if 'max_pps' in locals() else float("inf")
+        )
+    ]
+
+if d_from and d_to and "filter_date" in flt:
+    mask_date = flt["filter_date"].notna() & flt["filter_date"].between(
+        pd.Timestamp(d_from, tz=timezone.utc),
+        pd.Timestamp(d_to, tz=timezone.utc) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
     )
+    flt = flt[mask_date]
 
-# Pagination controls
-total_pages = math.ceil(total / page_size) if page_size else 1
-colp1, colp2, colp3 = st.columns([1, 2, 1])
-with colp1:
-    if st.button(" Prev", disabled=(page <= 0)):
-        page = max(0, page - 1)
-with colp2:
-    st.write(f"Page {page + 1} of {max(total_pages,1)} — {total:,} total")
-with colp3:
-    if st.button("Next", disabled=(page + 1 >= total_pages)):
-        page = min(total_pages - 1, page + 1)
-st.session_state.page = page
+if q.strip():
+    qq = q.lower()
+    flt = flt[
+        flt["listing_title"].fillna("").str.lower().str.contains(qq)
+        | flt["address"].fillna("").str.lower().str.contains(qq)
+    ]
 
-# Export
-st.download_button(
-    "Download CSV",
-    data=make_csv(df),
-    file_name=f"listings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-    mime="text/csv",
+# ---------- KPIs ----------
+left, mid, right, right2 = st.columns(4)
+with left:
+    kpi("Listings (filtered)", len(flt))
+with mid:
+    kpi("Median price/sqm", f"₱ {int(np.nanmedian(flt['price_per_sqm'])):,}" if flt["price_per_sqm"].notna().any() else None)
+with right:
+    kpi("Avg price/sqm", f"₱ {int(np.nanmean(flt['price_per_sqm'])):,}" if flt["price_per_sqm"].notna().any() else None)
+with right2:
+    kpi("Cities", flt["city"].nunique())
+
+st.divider()
+
+# ---------- Table ----------
+view_cols = [
+    "listing_title", "city", "address", "property_type",
+    "price_php", "area_sqm", "price_per_sqm",
+    "filter_date_local", "url",
+]
+present = [c for c in view_cols if c in flt.columns]
+st.subheader("Results")
+st.caption("Click column headers to sort. Use filters in the sidebar to narrow results.")
+st.dataframe(
+    flt[present].rename(columns={
+        "filter_date_local": "date",
+        "price_php": "price (PHP)",
+        "area_sqm": "area (sqm)",
+        "price_per_sqm": "PHP/sqm",
+    }),
+    use_container_width=True,
+    hide_index=True,
 )
 
+# ---------- Quick viz (optional) ----------
+if flt["price_per_sqm"].notna().sum() >= 5:
+    st.subheader("Distribution of Price per sqm")
+    st.bar_chart(flt["price_per_sqm"].dropna())
 
+# ---------- Download ----------
+csv = flt[present].to_csv(index=False).encode("utf-8")
+st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
+
+st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
