@@ -21,7 +21,7 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.stop()
 
 # -------------------- Helpers -----------------------
-@st.cache_data(ttl=600)
+
 def get_client():
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
@@ -208,3 +208,4 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
