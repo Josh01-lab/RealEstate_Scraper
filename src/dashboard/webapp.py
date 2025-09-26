@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-ROOT = Path(_file_).resolve().parents[2]  # repo root (…/RealEstate_Scraper)
+ROOT = Path(__file__).resolve().parents[2]  # repo root (…/RealEstate_Scraper)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 # ------------------------------------------------------------------------
@@ -96,4 +96,5 @@ with right:
 
 st.divider()
 st.caption(f"Source: {portal} • Showing last {days_back} day(s) • Min area ≥ {min_area} sqm")
+
 
