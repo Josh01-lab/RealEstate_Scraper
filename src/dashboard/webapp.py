@@ -12,7 +12,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta, timezone
-
+from postgrest import APIError
 
 # Optional Supabase client
 try:
@@ -25,33 +25,24 @@ st.set_page_config(page_title="Listings Dashboard", layout="wide")
 
 
 @st.cache_data(show_spinner=False)
-def load_data(source: str | None = None, limit: int = 5000) -> pd.DataFrame:
-    """Load from Supabase if creds are present; else return small sample."""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_ANON_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    if create_client and url and key:
-        sb = create_client(url, key)
-        q = sb.table("listings").select(
-            "url, listing_title, source, property_type, address, city, "
-            "price_php, area_sqm, price_per_sqm, scraped_at, published_at"
-        )
+def load_data(source: str | None, limit: int = 500):
+    sb = get_client()
+    try:
+        # Minimal probe: if this fails, it’s permissions/env, not your ORDER BY.
+        probe = sb.table("listings").select("url").limit(1).execute().data
+        st.write("Probe OK:", probe)
+
+        q = sb.table("listings").select("*")
         if source:
             q = q.eq("source", source)
         res = q.order("scraped_at", desc=True).limit(limit).execute()
-        return pd.DataFrame(res.data or [])
-    # Fallback sample (keeps the app usable without a DB)
-    return pd.DataFrame({
-        "listing_title": ["Sample A", "Sample B", "Sample C"],
-        "property_type": ["Offices", "Serviced Office", "Offices"],
-        "address": ["Cebu IT Park, Cebu", "Cebu Business Park, Cebu", "Lapu-Lapu"],
-        "city": ["Cebu", "Cebu", "Lapu-Lapu"],
-        "price_php": [20000, 12000, 35000],
-        "area_sqm": [40, 10, 70],
-        "price_per_sqm": [500, 1200, 500],
-        "scraped_at": [datetime.now(timezone.utc).isoformat()] * 3,
-        "published_at": [None, None, None],
-        "url": ["https://example.com/a", "https://example.com/b", "https://example.com/c"],
-    })
+        return pd.DataFrame(res.data)
+    except APIError as e:
+        st.error("Supabase query failed. See logs.")
+        # Log the full error (you'll see it in Streamlit logs)
+        st.write("PostgREST error:", e.args[0])  # shows code/message/details
+        raise
+
 
 
 def prep_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -228,5 +219,6 @@ if "price_per_sqm" in df_f and df_f["price_per_sqm"].notna().sum() > 0:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No price_per_sqm values to plot.")
+
 
 
