@@ -13,6 +13,20 @@ st.set_page_config(
     page_icon="🏢",
 )
 
+try:
+    import plotly.express as px
+    HAS_PLOTLY = True
+except Exception:
+    HAS_PLOTLY = False
+
+# later when plotting:
+if HAS_PLOTLY:
+    fig = px.bar(df, x="something", y="value")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("Plotly not installed; using fallback chart.")
+    st.bar_chart(df.set_index("something")["value"])
+
 # -------------------- Data --------------------
 @st.cache_data(ttl=600)
 def load_listings(source: str | None):
@@ -165,3 +179,4 @@ if df_f["price_per_sqm"].notna().sum() > 0:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No price_per_sqm values to plot.")
+
