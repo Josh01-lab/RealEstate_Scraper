@@ -1,3 +1,13 @@
+import sys
+from pathlib import Path
+
+# webapp.py -> src/dashboard/webapp.py
+# repo root is two levels up from src: <repo>/
+REPO_ROOT = Path(_file_).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+# ---------------------------------------------------
+
 import os
 from datetime import datetime, timezone, timedelta
 
@@ -179,4 +189,5 @@ if df_f["price_per_sqm"].notna().sum() > 0:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No price_per_sqm values to plot.")
+
 
