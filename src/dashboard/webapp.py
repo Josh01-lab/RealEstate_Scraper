@@ -1,9 +1,19 @@
+import sys
+from pathlib import Path
+
+ROOT = Path(_file_).resolve().parents[2]  # repo root (…/RealEstate_Scraper)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# ------------------------------------------------------------------------
+
+from src.db.supabase_client import get_client
+
 import os
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
-from src.db.supabase_client import get_client
+
 
 st.set_page_config(page_title="Listings Dashboard", layout="wide")
 
@@ -86,3 +96,4 @@ with right:
 
 st.divider()
 st.caption(f"Source: {portal} • Showing last {days_back} day(s) • Min area ≥ {min_area} sqm")
+
