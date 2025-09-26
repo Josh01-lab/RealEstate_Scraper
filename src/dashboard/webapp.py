@@ -24,24 +24,13 @@ except ImportError:
 st.set_page_config(page_title="Listings Dashboard", layout="wide")
 
 
-@st.cache_data(show_spinner=False)
-def load_data(source: str | None, limit: int = 500):
+@st.cache_data(ttl=300)
+def load_data(source_tag: str | None = None):
     sb = get_client()
-    try:
-        # Minimal probe: if this fails, it’s permissions/env, not your ORDER BY.
-        probe = sb.table("listings").select("url").limit(1).execute().data
-        st.write("Probe OK:", probe)
-
-        q = sb.table("listings").select("*")
-        if source:
-            q = q.eq("source", source)
-        res = q.order("scraped_at", desc=True).limit(limit).execute()
-        return pd.DataFrame(res.data)
-    except APIError as e:
-        st.error("Supabase query failed. See logs.")
-        # Log the full error (you'll see it in Streamlit logs)
-        st.write("PostgREST error:", e.args[0])  # shows code/message/details
-        raise
+    q = sb.table("listings").select("*")
+    if source_tag:
+        q = q.eq("source", source_tag)
+    return q.order("scraped_at", desc=True).limit(1000).execute().data
 
 
 
@@ -219,6 +208,7 @@ if "price_per_sqm" in df_f and df_f["price_per_sqm"].notna().sum() > 0:
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("No price_per_sqm values to plot.")
+
 
 
 
