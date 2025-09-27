@@ -47,6 +47,30 @@ def _to_ts(x: Optional[str]) -> Optional[pd.Timestamp]:
         return pd.to_datetime(x, utc=True, errors="coerce")
     except Exception:
         return None
+def _to_dt_safe(x):
+    # Normalize ISO strings / None / NaN to pandas timestamps (UTC)
+    if x is None or (isinstance(x, float) and pd.isna(x)) or (isinstance(x, str) and not x.strip()):
+        return pd.NaT
+    try:
+        return pd.to_datetime(x, utc=True, errors="coerce")
+    except Exception:
+        return pd.NaT
+
+# Ensure columns exist; if missing, create empty with NaT
+if "published_at" not in df.columns:
+    df["published_at"] = pd.NaT
+if "scraped_at" not in df.columns:
+    df["scraped_at"] = pd.NaT
+
+# Parse to datetimes
+df["published_at_dt"] = df["published_at"].apply(_to_dt_safe)
+df["scraped_at_dt"]   = df["scraped_at"].apply(_to_dt_safe)
+
+# Coalesce: prefer published_at, else scraped_at
+df["filter_date"] = df["published_at_dt"].fillna(df["scraped_at_dt"])
+
+# Optional: if you use filter_date for sorting/filters and want strings
+# df["filter_date_str"] = df["filter_date"].dt.strftime("%Y-%m-%d %H:%M:%S%z").fillna("")
 
 def coalesce_datetime(a: Optional[str], b: Optional[str]) -> Optional[pd.Timestamp]:
     # prefer published_at; else scraped_at
@@ -261,5 +285,6 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
