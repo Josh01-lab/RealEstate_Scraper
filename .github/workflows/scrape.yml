@@ -86,6 +86,7 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.discover.outputs.dir }}"
+          psql "$SUPABASE_DB_URL" -c "select take_market_snapshot('cebu_offices');"
 
       - name: Sanity check (count + latest rows)
         env:
