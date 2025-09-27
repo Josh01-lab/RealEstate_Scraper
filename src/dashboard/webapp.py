@@ -1,4 +1,4 @@
-
+from zoneinfo import ZoneInfo
 import os
 from datetime import timezone
 from typing import Optional, List
@@ -95,7 +95,9 @@ def load_data(source: str, limit: int = 5000) -> pd.DataFrame:
     # Filter date = published_at if present else scraped_at
     df["filter_date"] = [coalesce_datetime(pa, sa) for pa, sa in zip(df.get("published_at"), df.get("scraped_at"))]
     if df["filter_date"].notna().any():
-        df["filter_date_local"] = df["filter_date"].dt.tz_convert(TIMEZONE).dt.strftime("%Y-%m-%d %H:%M")
+        df["filter_date_local"] = (
+        df["filter_date"].dt.tz_convert(ZoneInfo(TIMEZONE)).dt.strftime("%Y-%m-%d %H:%M")
+        )
     else:
         df["filter_date_local"] = None
 
@@ -121,20 +123,42 @@ with st.sidebar:
     st.header("Filters")
 
     # City filter
-    cities = sorted([c for c in df["city"].dropna().unique().tolist()])
-    city_sel: List[str] = st.multiselect("City", options=cities, default=cities or [])
+    cities = sorted([c for c in df.get("city", pd.Series(dtype=str)).dropna().unique().tolist()])
+    city_sel: List[str] = st.multiselect("City", options=cities, default=cities)
 
     # Property type filter
-    ptypes = sorted([p for p in df["property_type"].dropna().unique().tolist()])
-    type_sel: List[str] = st.multiselect("Property type", options=ptypes, default=ptypes or [])
+    ptypes = sorted([p for p in df.get("property_type", pd.Series(dtype=str)).dropna().unique().tolist()])
+    type_sel: List[str] = st.multiselect("Property type", options=ptypes, default=ptypes)
+
 
     # Price/sqm slider with robust bounds
-    pps = df["price_per_sqm"].dropna().astype(float)
-    if len(pps):
+    pps = pd.to_numeric(df.get("price_per_sqm"), errors="coerce")
+    pps = pps[pps.notna() & np.isfinite(pps)]
+    
+    if len(pps) >= 3:
         lo = float(np.nanpercentile(pps, 1))
         hi = float(np.nanpercentile(pps, 99))
-        min_pps, max_pps = st.slider("Price per sqm (PHP)", min_value=0.0, max_value=max(hi, lo),
-                                     value=(lo, hi), step=50.0)
+        if not np.isfinite(lo) or not np.isfinite(hi) or lo >= hi:
+            lo = float(pps.min())
+            hi = float(pps.max())
+    elif len(pps) == 2:
+        lo, hi = float(pps.min()), float(pps.max())
+    elif len(pps) == 1:
+        lo = hi = float(pps.iloc[0])
+    else:
+        lo = hi = None
+    
+    if lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi):
+        # widen a tiny bit if both equal to keep Streamlit happy
+        if lo == hi:
+            hi = lo + 1.0
+        min_pps, max_pps = st.slider(
+            "Price per sqm (PHP)",
+            min_value=float(max(0.0, min(lo, hi, default=0.0))),
+            max_value=float(max(lo, hi)),
+            value=(float(lo), float(hi)),
+            step=50.0,
+        )
     else:
         min_pps, max_pps = 0.0, float("inf")
         st.caption("No price/sqm values yet; slider disabled.")
@@ -143,26 +167,40 @@ with st.sidebar:
     if df["filter_date"].notna().any():
         dmin = pd.to_datetime(df["filter_date"].min()).date()
         dmax = pd.to_datetime(df["filter_date"].max()).date()
-        d_from, d_to = st.date_input("Date range (published/scraped)", value=(dmin, dmax),
-                                     min_value=dmin, max_value=dmax)
+        picked = st.date_input(
+            "Date range (published/scraped)",
+            value=(dmin, dmax),
+            min_value=dmin, max_value=dmax
+        )
+        # Streamlit can return a single date if ranges collapse; normalize
+        if isinstance(picked, tuple) and len(picked) == 2:
+            d_from, d_to = picked
+        else:
+            d_from = d_to = picked
     else:
         d_from = d_to = None
         st.caption("No date metadata present to filter by.")
-
-    # Free text search
-    q = st.text_input("Search text (title/address)", "")
+    
+    # Apply date filter (inclusive, tz-aware)
+    if d_from and d_to and "filter_date" in flt.columns:
+        start = pd.Timestamp(d_from, tz="UTC")
+        end = pd.Timestamp(d_to, tz="UTC") + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        mask_date = flt["filter_date"].notna() & flt["filter_date"].between(start, end)
+        flt = flt[mask_date]
 
 # -------------------- Apply filters ----------------
 flt = df.copy()
 
 if city_sel:
-    flt = flt[flt["city"].isin(city_sel)]
+    flt = flt[flt.get("city").isin(city_sel)]
 if type_sel:
-    flt = flt[flt["property_type"].isin(type_sel)]
+    flt = flt[flt.get("property_type").isin(type_sel)]
 
-if "price_per_sqm" in flt and len(flt):
+if "price_per_sqm" in flt.columns and len(flt):
     flt = flt[
-        flt["price_per_sqm"].astype(float).fillna(-1).between(
+        pd.to_numeric(flt["price_per_sqm"], errors="coerce")
+        .fillna(-1)
+        .between(
             min_pps if np.isfinite(min_pps) else -1,
             max_pps if np.isfinite(max_pps) else float("inf")
         )
@@ -178,8 +216,8 @@ if d_from and d_to and "filter_date" in flt:
 if q.strip():
     qq = q.lower()
     flt = flt[
-        flt["listing_title"].fillna("").str.lower().str.contains(qq)
-        | flt["address"].fillna("").str.lower().str.contains(qq)
+        flt.get("listing_title", pd.Series("", index=flt.index)).fillna("").str.lower().str.contains(qq)
+        | flt.get("address", pd.Series("", index=flt.index)).fillna("").str.lower().str.contains(qq)
     ]
 
 # -------------------- KPIs -------------------------
@@ -223,4 +261,5 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
