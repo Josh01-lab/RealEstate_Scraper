@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from supabase import create_client
+from src.db.supabase_client import get_client as _raw_get_client
+
 
 # -------------------- App config --------------------
 st.set_page_config(page_title="PH Office Listings", page_icon="", layout="wide")
@@ -19,11 +21,24 @@ TIMEZONE = "Asia/Manila"
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Supabase credentials are missing. Set SUPABASE_URL and SUPABASE_ANON_KEY in Streamlit secrets or env.")
     st.stop()
+    
 
 # -------------------- Helpers -----------------------
-
+@st.cache_resource
 def get_client():
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+@st.cache_data(ttl=300)  # 5 minutes; adjust as you like
+def fetch_listings(source: str) -> pd.DataFrame:
+    sb = get_client()
+    rows = (sb.table("listings")
+              .select("*")
+              .eq("source", source)
+              .order("scraped_at", desc=True)
+              .limit(5000)
+              .execute()
+              .data)
+    return pd.DataFrame(rows)
 
 def _to_ts(x: Optional[str]) -> Optional[pd.Timestamp]:
     if not x:
@@ -208,3 +223,4 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
