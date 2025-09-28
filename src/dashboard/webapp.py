@@ -132,8 +132,7 @@ def load_rows() -> list[dict]:
               .execute())
     return resp.data or []
 
-rows = load_rows()
-df = pd.DataFrame(rows)
+df = load_rows()
 
 # --- guard rails so df always exists and has expected columns ---
 if df.empty:
@@ -379,6 +378,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
