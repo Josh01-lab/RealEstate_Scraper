@@ -38,6 +38,8 @@ REQUIRED_COLS = [
     "area_sqm",
     "price_per_sqm",
     "published_at",
+    "published_at_text",
+    "description",
     "scraped_at",
     "source",
 ]
@@ -69,6 +71,9 @@ def _to_ts(x: Optional[str]) -> Optional[pd.Timestamp]:
         return None
 def _to_dt_safe(x):
     # Normalize ISO strings / None / NaN to pandas timestamps (UTC)
+    df = client.table("listings").select("*").execute().data
+    df = pd.DataFrame(df)
+
     if x is None or (isinstance(x, float) and pd.isna(x)) or (isinstance(x, str) and not x.strip()):
         return pd.NaT
     try:
@@ -78,7 +83,7 @@ def _to_dt_safe(x):
 
 # Ensure columns exist; if missing, create empty with NaT
 if "published_at" not in df.columns:
-    df["published_at"] = pd.NaT
+    df["published_at"] = None
 if "scraped_at" not in df.columns:
     df["scraped_at"] = pd.NaT
 
@@ -186,7 +191,7 @@ def load_listings_df(source_filter: str = None, limit: int = 1000) -> pd.DataFra
     # Ensure required columns exist (avoid KeyError/NameError later)
     for col in REQUIRED_COLS:
         if col not in df.columns:
-            df[col] = pd.NA
+            df[col] = None
 
     # Coerce types safely
     if not df.empty:
@@ -374,6 +379,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
