@@ -28,6 +28,19 @@ TIMEZONE = "Asia/Manila"
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Supabase credentials are missing. Set SUPABASE_URL and SUPABASE_ANON_KEY in Streamlit secrets or env.")
     st.stop()
+
+REQUIRED_COLS = [
+    "url",
+    "listing_title",
+    "address",
+    "property_type",
+    "price_php",
+    "area_sqm",
+    "price_per_sqm",
+    "published_at",
+    "scraped_at",
+    "source",
+]
    
 
 # -------------------- Helpers -----------------------
@@ -151,42 +164,57 @@ if {"price_php", "area_sqm"}.issubset(df.columns):
 st.dataframe(df[["url","listing_title","address","published_at","scraped_at","price_php","area_sqm","price_per_sqm"]])
 
 
-@st.cache_data(ttl=600, show_spinner="Loading listings from Supabase…")
-def load_data(source: str, limit: int = 5000) -> pd.DataFrame:
-    sb = get_client()
-    cols = [
-        "url","listing_title","address","property_type",
-        "price_php","area_sqm","price_per_sqm",
-        "published_at","published_at_text","scraped_at","source",
-    ]
-    resp = (sb.table("listings")
-              .select(",".join(cols))
-              .eq("source", source)
-              .order("scraped_at", desc=True)
-              .limit(limit)
-              .execute())
-    df = pd.DataFrame(resp.data or [])
-    if df.empty:
-        return df
+@st.cache_data(show_spinner=False, ttl=300)
+def load_listings_df(source_filter: str = None, limit: int = 1000) -> pd.DataFrame:
+    """
+    Best-effort load from Supabase. Never raises; always returns a DataFrame.
+    """
+    try:
+        sb = get_client()
+        q = sb.table("listings").select("*")
+        if source_filter:
+            q = q.eq("source", source_filter)
+        # Order newest first
+        res = q.order("scraped_at", desc=True).limit(limit).execute()
+        data = res.data or []
+        df = pd.DataFrame(data)
+    except Exception as e:
+        # Log to Streamlit and fall back to empty frame
+        st.warning(f"Could not load data from Supabase: {e}")
+        df = pd.DataFrame()
 
-    # Normalize/derived
-    df["city"] = df["address"].apply(extract_city)
-    # Compute price_per_sqm if missing and both parts exist
-    need_pps = df["price_per_sqm"].isna() if "price_per_sqm" in df else True
-    if "price_php" in df and "area_sqm" in df:
-        can_compute = df["price_php"].notna() & df["area_sqm"].notna() & (df["area_sqm"] > 0)
-        df.loc[need_pps & can_compute, "price_per_sqm"] = df["price_php"] / df["area_sqm"]
+    # Ensure required columns exist (avoid KeyError/NameError later)
+    for col in REQUIRED_COLS:
+        if col not in df.columns:
+            df[col] = pd.NA
 
-    # Filter date = published_at if present else scraped_at
-    df["filter_date"] = [coalesce_datetime(pa, sa) for pa, sa in zip(df.get("published_at"), df.get("scraped_at"))]
-    if df["filter_date"].notna().any():
-        df["filter_date_local"] = (
-        df["filter_date"].dt.tz_convert(ZoneInfo(TIMEZONE)).dt.strftime("%Y-%m-%d %H:%M")
-        )
-    else:
-        df["filter_date_local"] = None
+    # Coerce types safely
+    if not df.empty:
+        # published_at/scraped_at to datetimes
+        df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce", utc=True)
+        df["scraped_at"]   = pd.to_datetime(df["scraped_at"], errors="coerce", utc=True)
+        # numerics
+        for col in ["price_php", "area_sqm", "price_per_sqm"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
+
+# ----- main app code -----
+st.set_page_config(page_title="Listings Dashboard", layout="wide")
+
+# Example: filter for your portal
+portal = st.sidebar.selectbox("Source", ["lamudi_cebu", "all"], index=0)
+source_filter = None if portal == "all" else portal
+
+df = load_listings_df(source_filter=source_filter, limit=2000)
+
+# From here on, df is ALWAYS defined
+if df.empty:
+    st.info("No data yet. Try running the scraper or widening your filters.")
+else:
+    # Your existing UI/metrics/tables follow...
+    pass
+
 
 # -------------------- UI ---------------------------
 st.title(" Cebu Office Listings — Analytics")
@@ -346,6 +374,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
