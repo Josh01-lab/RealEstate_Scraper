@@ -1,3 +1,10 @@
+from pathlib import Path
+import sys
+ROOT = Path(__file__).resolve().parents[2]  # repo root
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+# ---------------------------------------------------------------------------
+
 from zoneinfo import ZoneInfo
 import os
 from datetime import timezone
@@ -285,6 +292,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
