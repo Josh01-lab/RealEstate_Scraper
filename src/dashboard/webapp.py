@@ -28,7 +28,7 @@ TIMEZONE = "Asia/Manila"
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Supabase credentials are missing. Set SUPABASE_URL and SUPABASE_ANON_KEY in Streamlit secrets or env.")
     st.stop()
-    
+   
 
 # -------------------- Helpers -----------------------
 @st.cache_resource
@@ -219,7 +219,7 @@ with st.sidebar:
     # Price/sqm slider with robust bounds
     pps = pd.to_numeric(df.get("price_per_sqm"), errors="coerce")
     pps = pps[pps.notna() & np.isfinite(pps)]
-    
+   
     if len(pps) >= 3:
         lo = float(np.nanpercentile(pps, 1))
         hi = float(np.nanpercentile(pps, 99))
@@ -232,7 +232,7 @@ with st.sidebar:
         lo = hi = float(pps.iloc[0])
     else:
         lo = hi = None
-    
+   
     if lo is not None and hi is not None and np.isfinite(lo) and np.isfinite(hi):
         # widen a tiny bit if both equal to keep Streamlit happy
         if lo == hi:
@@ -265,7 +265,7 @@ with st.sidebar:
     else:
         d_from = d_to = None
         st.caption("No date metadata present to filter by.")
-    
+   
     # Apply date filter (inclusive, tz-aware)
     if d_from and d_to and "filter_date" in flt.columns:
         start = pd.Timestamp(d_from, tz="UTC")
@@ -346,8 +346,6 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
-
-
 
 
 
