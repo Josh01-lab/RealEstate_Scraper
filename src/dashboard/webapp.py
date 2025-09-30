@@ -117,20 +117,21 @@ def _fmt_php(x: Optional[float]) -> str:
 
 # --- fetch data ---
 @st.cache_data(ttl=300)
-def load_rows() -> list[dict]:
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-    if not url or not key:
-        st.error("Supabase credentials missing. Set SUPABASE_URL and a key in env.")
-        return []
-    sb: Client = create_client(url, key)
-    # Pull what you need; * includes all columns so published_at is included if it exists
-    resp = (sb.table("listings")
-              .select("*")
-              .order("scraped_at", desc=True)
-              .limit(500)
-              .execute())
-    return resp.data or []
+def load_data():
+    url = "https://<your-supabase-project>.supabase.co"
+    key = "<your-anon-or-service-key>"
+    client = create_client(url, key)
+    resp = client.table("listings").select("*").execute()
+    return pd.DataFrame(resp.data)
+
+
+
+# ✅ now you can check safely
+if "published_at" not in df.columns:
+    st.warning("⚠️ published_at column is missing from Supabase")
+else:
+    st.write(df[["url", "title", "published_at"]].head())
+
 
 df = load_rows()
 
@@ -378,6 +379,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
