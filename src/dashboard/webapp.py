@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from supabase import create_client
-
+from typing import Union 
 # ---------- App config ----------
 st.set_page_config(page_title="PH Office Listings", page_icon="", layout="wide")
 
@@ -71,7 +71,7 @@ def get_client():
     return create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 # ---------- Helpers ----------
-def _to_utc_ts(x: Optional[str]) -> pd.Timestamp | pd.NaT:
+def _to_utc_ts(x: Optional[str]) -> pd.Timestamp:
     if x is None or (isinstance(x, float) and pd.isna(x)) or (isinstance(x, str) and not x.strip()):
         return pd.NaT
     try:
@@ -280,6 +280,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
