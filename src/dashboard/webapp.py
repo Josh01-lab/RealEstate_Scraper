@@ -28,7 +28,6 @@ REQUIRED_COLS = [
     "published_at", "published_at_text", "description",
     "scraped_at", "source",
 ]
-df = pd.DataFrame(rows)
 
 try:
     from dotenv import load_dotenv
@@ -281,6 +280,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
