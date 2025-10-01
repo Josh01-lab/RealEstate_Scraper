@@ -30,6 +30,38 @@ REQUIRED_COLS = [
 ]
 df = pd.DataFrame(rows)
 
+try:
+    from dotenv import load_dotenv
+    ROOT = Path(_file_).resolve().parents[1]
+    load_dotenv(ROOT / ".env")
+except Exception:
+    pass
+
+from src.db.supabase_client import get_client
+
+# Be tolerant with columns (table may not have every field yet)
+SAFE_COLUMNS = (
+    "url,listing_title,address,property_type,price_php,area_sqm,"
+    "price_per_sqm,published_at,scraped_at,source,description"
+)
+
+sb = get_client()
+
+def fetch_rows(limit=50):
+    # Use a safe field list; if some columns don’t exist yet, fall back to "*"
+    try:
+        return (sb.table("listings")
+                  .select(SAFE_COLUMNS)
+                  .order("scraped_at", desc=True)
+                  .limit(limit)
+                  .execute().data)
+    except Exception:
+        return (sb.table("listings")
+                  .select("*")
+                  .order("scraped_at", desc=True)
+                  .limit(limit)
+                  .execute().data)
+
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Supabase credentials are missing. Set SUPABASE_URL and SUPABASE_ANON_KEY in Streamlit secrets or env.")
     st.stop()
@@ -249,5 +281,6 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
