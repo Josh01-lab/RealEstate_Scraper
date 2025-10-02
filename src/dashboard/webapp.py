@@ -49,13 +49,11 @@ sb = get_client()
 def fetch_rows(limit=50):
     # Use a safe field list; if some columns don’t exist yet, fall back to "*"
     try:
-        return  sb.table("listings") \
-                  .select("...") \
-                  .eq("source", "lamudi_cebu") \
-                  .gte("published_at", start_iso) \
-                  .lte("published_at", end_iso) \
-                  .range(0, 12)  # possible cause: small range/pagination
-                  .execute()
+        return  (sb.table("listings")
+                .select(SAFE_COLUMNS)
+                .order("scraped_at", desc=True)
+                .limit(limit)
+                .execute().data)
 
     except Exception:
         return (sb.table("listings")
@@ -283,6 +281,7 @@ csv = show.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="listings_filtered.csv", mime="text/csv")
 
 st.caption("Data source: Supabase • Date = published_at if present, else scraped_at • Currency = PHP")
+
 
 
 
