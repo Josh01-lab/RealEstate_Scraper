@@ -22,7 +22,6 @@ def fetch_listings(source_tag: str) -> pd.DataFrame:
         "url",
         "listing_title",
         "address",
-        "city",
         "property_type",
         "price_php",
         "area_sqm",
@@ -181,5 +180,6 @@ with right_col:
 
 st.markdown("---")
 st.caption("Data is pulled live from Supabase. Use 'Refresh data' in the sidebar to clear app cache.")
+
 
 
