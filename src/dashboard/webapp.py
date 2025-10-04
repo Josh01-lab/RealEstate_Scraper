@@ -1,5 +1,5 @@
 import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(_file_), "../..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 import os
 import io
 import csv
@@ -327,5 +327,6 @@ st.markdown(
     - Filters are applied server-side; if you see unexpected results double-check column types in Supabase.
     """
 )
+
 
 
