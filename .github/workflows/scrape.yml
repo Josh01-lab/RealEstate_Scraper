@@ -17,7 +17,7 @@ env:
   # ---------- Scraper env caps ----------
   SCRAPING_MODE: playwright        # use playwright in CI
   RATE_LIMIT_DELAY: "1.0"          # seconds between requests/pages
-  MAX_PAGES: "1"                   # only first page of results
+  MAX_PAGES: "-1"                   # only first page of results
   MAX_LISTINGS: "50"               # hard cap on discovered URLs
   PYTHONUNBUFFERED: "2"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
