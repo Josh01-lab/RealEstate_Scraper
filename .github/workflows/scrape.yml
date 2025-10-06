@@ -84,6 +84,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           python -m src.runner.write_portal_dump_to_supabase --portal lamudi_cebu --run-dir "${{ steps.discover.outputs.dir }}"
           psql "$SUPABASE_DB_URL" -c "select take_market_snapshot('cebu_offices');"
