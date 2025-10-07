@@ -123,7 +123,7 @@ class SupabaseWriter:
                     # last attempt -> restore unsent rows and re-raise
                     if attempt == self.retries:
                         # restore remaining payload (current chunk + rest)
-                        remaining = chunk + payload[start + CHUNK 
+                        remaining = chunk + payload[start : start + CHUNK] 
                         # prepend remaining so next flush will attempt them first
                         self.buffer = remaining + self.buffer
                         _log(f"[supabase_writer] FAILED after {self.retries} attempts; restored {len(remaining)} rows to buffer")
