@@ -73,35 +73,68 @@ class SupabaseWriter:
     def flush(self) -> None:
         if not self.buffer:
             return
-
+    
+        # take ownership of payload and clear buffer optimistically
         payload = self.buffer
         self.buffer = []
-
-        CHUNK = 250
-        for i in range(0, len(payload), CHUNK):
-            chunk = payload[i:i + CHUNK]
+    
+        # chunk size configurable via env var
+        try:
+            CHUNK = int(os.getenv("SUPABASE_UPSERT_CHUNK", "250"))
+        except Exception:
+            CHUNK = 250
+    
+        # helper for logging
+        def _log(msg):
+            if hasattr(self, "logger") and getattr(self, "logger"):
+                self.logger.info(msg)
+            else:
+                print(msg)
+    
+        total = len(payload)
+        _log(f"[supabase_writer] flushing {total} rows in chunks of {CHUNK}")
+    
+        # iterate chunks
+        for start in range(0, total, CHUNK):
+            chunk = payload[start : start + CHUNK]
+    
+            # try attempts with exponential backoff
             for attempt in range(1, self.retries + 1):
                 try:
-                    # primary path: NULL-safe RPC
-                    self.client.rpc('upsert_listings_batch', {'rows': chunk}).execute()
-                    # optional: lightweight progress log
-                    # print(f"[supabase_writer] RPC upsert ok: {len(chunk)} rows")
-                    break
-                except Exception as e:
-                    # If the RPC doesn’t exist or fails, try a direct upsert as a fallback
-                    if "upsert_listings_batch" in str(e):
-                        try:
-                            self.client.table("listings").upsert(
-                                chunk, on_conflict="url", returning="minimal"
-                            ).execute()
-                            # print(f"[supabase_writer] Fallback upsert ok: {len(chunk)} rows")
+                    # Primary path: call RPC (recommended if implemented in DB to be NULL-safe)
+                    try:
+                        self.client.rpc("upsert_listings_batch", {"rows": chunk}).execute()
+                        _log(f"[supabase_writer] RPC upsert ok: {len(chunk)} rows")
+                        break
+                    except Exception as rpc_exc:
+                        # if RPC appears to be missing or failing, fall back to direct upsert
+                        rpc_msg = str(rpc_exc).lower()
+                        if "upsert_listings_batch" in rpc_msg or "could not find" in rpc_msg or "rpc" in rpc_msg:
+                            _log("[supabase_writer] RPC upsert failed or not available; attempting fallback to table upsert")
+                            # fallback to normal upsert
+                            self.client.table("listings").upsert(chunk, on_conflict="url", returning="minimal").execute()
+                            _log(f"[supabase_writer] Fallback upsert ok: {len(chunk)} rows")
                             break
-                        except Exception as e2:
-                            if attempt == self.retries:
-                                raise
+                        else:
+                            # unknown RPC error: re-raise into outer except to handle retry/backoff
+                            raise
+    
+                except Exception as exc:
+                    # last attempt -> restore unsent rows and re-raise
                     if attempt == self.retries:
+                        # restore remaining payload (current chunk + rest)
+                        remaining = chunk + payload[start + CHUNK 
+                        # prepend remaining so next flush will attempt them first
+                        self.buffer = remaining + self.buffer
+                        _log(f"[supabase_writer] FAILED after {self.retries} attempts; restored {len(remaining)} rows to buffer")
                         raise
-                    time.sleep(2 ** attempt)
+                    else:
+                        wait = 2 ** attempt
+                        _log(f"[supabase_writer] attempt {attempt} failed: {exc}. retrying in {wait}s")
+                        time.sleep(wait)
+    
+        _log("[supabase_writer] flush complete")
+
 
 
     def close(self) -> None:
