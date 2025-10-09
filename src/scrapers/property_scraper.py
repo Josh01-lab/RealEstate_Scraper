@@ -14,7 +14,8 @@ from src.config import ENV_SCRAPE_MODE, ENV_RATE_DELAY, MAX_LISTINGS, MAX_PAGES
 from src.utils.jsonld import _jsonld_iter, extract_jsonld_blocks, find_first
 import jsonlines
 from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout       
-
+import random, time, jsonlines
+from urllib.parse import urljoin
 
 
 
@@ -230,10 +231,6 @@ class PropertyScraper:
         - Uses cfg.listing_selector for per-listing anchors.
         - Uses cfg.pagination_selector to find the "next page" link (e.g., a[rel='next']).
         """
-        import random, time, jsonlines
-        from urllib.parse import urljoin
-
-
         self.logger.info(f"Discovery start {cfg.portal_name}")
 
 
@@ -326,7 +323,7 @@ class PropertyScraper:
                 # Optional: normalize pagination URLs so we don't end up with double ?page=?page=
                 if next_url:
                     # remove duplicate query fragments like '?page=1?page=2'
-                    parsed = urlparse(nxt_url)
+                    parsed = urlparse(next_url)
                     qs = parsed.query
                     # minimal sanitization example: keep only last page= value if repeated
                     if qs and "page=" in qs:
@@ -980,6 +977,7 @@ class PropertyScraper:
     
     
     
+
 
 
 
