@@ -306,15 +306,32 @@ class PropertyScraper:
                 # --- next page (via pagination link)
                 next_url = None
                 if cfg.pagination_selector:
-                    nxt = soup.select_one(cfg.pagination_selector)
-                    if nxt and nxt.get("href"):
-                        next_url = urljoin(current, nxt.get("href"))
-
-
-                pages += 1
-                self.logger.info(
-                    f"Page {pages}: {found_this_page} listings | total={len(all_urls)} | next={bool(next_url)}"
-                )
+                    next_el = soup.select_one(cfg.pagination_selector)
+                    if next_el:
+                        # if element contains an explicit href, use it
+                        href = next_el.get("href")
+                        # lamudi uses data-islast/data-islink attributes; stop if last
+                        islast = next_el.get("data-islast")
+                        if islast and str(islast).lower() in ("true", "1"):
+                            next_url = None
+                        else:
+                            if href:
+                                # join relative -> absolute
+                                next_url = urljoin(current, href)
+                            else:
+                                # sometimes the next button carries page number in a data-attr or JS; try id href fallback
+                                # (no-op here, but left for future extension)
+                                next_url = None
+                
+                # Optional: normalize pagination URLs so we don't end up with double ?page=?page=
+                if next_url:
+                    # remove duplicate query fragments like '?page=1?page=2'
+                    parsed = urlparse(nxt_url)
+                    qs = parsed.query
+                    # minimal sanitization example: keep only last page= value if repeated
+                    if qs and "page=" in qs:
+                        # keep as-is — URLJoin handled it; optionally extra sanitization can be done here
+                        pass
 
 
                 # stop if no more pages
@@ -963,6 +980,7 @@ class PropertyScraper:
     
     
     
+
 
 
 
