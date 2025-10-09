@@ -5,7 +5,7 @@
       "seed_urls": ["https://www.lamudi.com.ph/rent/cebu/cebu-1/commercial/"],
       "scraping_mode": "playwright",
       "listing_selector": "a[href*='/property/']",
-      "pagination_selector": "a[rel='next'], nav[aria-label='Pagination'] a[aria-label='Next']",
+      "pagination_selector": "a[data-test='pagination-next']",
       "rate_limit_delay": 1.0,
       "max_pages": 0,     
       "wait_for_selector": "a[href*='/property/']",
@@ -17,3 +17,4 @@
   ]
 
 }
+
